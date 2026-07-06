@@ -1,0 +1,21 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      # Untimed cache warm: the M1 clock starts inside the test, not here.
+      - run: docker pull -q oven/bun:1-alpine
+      - name: unit + M1 full loop (soft 60s / hard 90s)
+        run: bun test

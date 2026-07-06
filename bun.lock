@@ -5,6 +5,11 @@
     "": {
       "name": "open-platform-ts",
       "devDependencies": {
+        "@op/core": "workspace:*",
+        "@op/engine": "workspace:*",
+        "@op/mitosis": "workspace:*",
+        "@op/opd": "workspace:*",
+        "@op/secrets": "workspace:*",
         "@types/bun": "^1.3.0",
         "typescript": "^5.9.0",
       },

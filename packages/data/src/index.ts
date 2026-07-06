@@ -1,0 +1,226 @@
+import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
+import { chmod, cp, mkdir, readdir, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import type { StateDir } from "@op/core";
+import { isValidName, Result, TaggedError } from "@op/core";
+
+export class DataError extends TaggedError("DataError")<{
+  message: string;
+  op: string;
+}>() {}
+
+const DB_ARTIFACTS = new Set(["app.db", "app.db-wal", "app.db-shm"]);
+
+function invalid(op: string, owner: string, app: string) {
+  return Result.err(
+    new DataError({ message: `invalid app name: ${owner}/${app}`, op }),
+  );
+}
+
+function liveDir(sd: StateDir, owner: string, app: string): string {
+  return resolve(sd.appdataDir, owner, app);
+}
+
+function snapshotsDir(sd: StateDir, owner: string, app: string): string {
+  return resolve(sd.appdataDir, ".snapshots", owner, app);
+}
+
+/** mkdir appdata/<owner>/<app>/files; returns absolute dir. Idempotent. */
+export async function provisionDataDir(
+  sd: StateDir,
+  owner: string,
+  app: string,
+): Promise<Result<string, DataError>> {
+  const op = "provisionDataDir";
+  if (!isValidName(owner) || !isValidName(app)) return invalid(op, owner, app);
+  const dir = liveDir(sd, owner, app);
+  return Result.tryPromise({
+    try: async () => {
+      await mkdir(join(dir, "files"), { recursive: true });
+      // 0777 so the container's unprivileged 65534:65534 user can write to
+      // the bind mount without a host-side chown (mkdir mode is umask-masked,
+      // hence explicit chmod).
+      await chmod(dir, 0o777);
+      await chmod(join(dir, "files"), 0o777);
+      return dir;
+    },
+    catch: (cause) => new DataError({ message: String(cause), op }),
+  });
+}
+
+/** Flush the WAL into the main db file from the host side; POSIX locks
+ *  coordinate with a running app on the same host. */
+function checkpoint(dbFile: string): void {
+  const db = new Database(dbFile);
+  try {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  } finally {
+    db.close();
+  }
+}
+
+async function cloneDir(src: string, dest: string): Promise<void> {
+  // APFS clonefile
+  const apfs = Bun.spawn(["cp", "-c", "-R", src, dest], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if ((await apfs.exited) === 0) return;
+  await rm(dest, { recursive: true, force: true });
+
+  // GNU coreutils reflink (XFS/btrfs)
+  const reflink = Bun.spawn(["cp", "-a", "--reflink=always", src, dest], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if ((await reflink.exited) === 0) return;
+  await rm(dest, { recursive: true, force: true });
+
+  // No CoW available: VACUUM INTO gives a consistent db copy even without
+  // an atomic clone; everything else is a plain copy.
+  await mkdir(dest, { recursive: true });
+  const dbFile = join(src, "app.db");
+  if (existsSync(dbFile)) {
+    const db = new Database(dbFile);
+    try {
+      db.run("VACUUM INTO ?", [join(dest, "app.db")]);
+    } finally {
+      db.close();
+    }
+  }
+  for (const entry of await readdir(src)) {
+    if (DB_ARTIFACTS.has(entry)) continue;
+    await cp(join(src, entry), join(dest, entry), { recursive: true });
+  }
+}
+
+function verifySnapshotDb(dbFile: string): string | null {
+  let db: Database;
+  try {
+    // Plain readonly can't open a WAL-mode db whose -shm/-wal are absent
+    // (SQLITE_CANTOPEN); immutable=1 is the sanctioned way to read a file
+    // nothing else is writing — exactly what a snapshot is. %/?/# would
+    // corrupt the URI, so escape them (sd.root is operator-chosen).
+    const uri = dbFile.replace(/[%?#]/g, (c) => encodeURIComponent(c));
+    db = new Database(`file:${uri}?immutable=1`, { readonly: true });
+  } catch (cause) {
+    return String(cause);
+  }
+  try {
+    const row = db.query("PRAGMA integrity_check").get() as Record<
+      string,
+      string
+    > | null;
+    const verdict = row ? Object.values(row)[0] : undefined;
+    return verdict === "ok" ? null : `integrity_check: ${verdict ?? "empty"}`;
+  } catch (cause) {
+    return String(cause);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Crash-consistent snapshot: checkpoint the WAL, CoW-clone the app dir,
+ * verify the clone's db. Never returns a snapshot that failed verification.
+ */
+export async function snapshot(
+  sd: StateDir,
+  owner: string,
+  app: string,
+): Promise<Result<{ id: string; dir: string }, DataError>> {
+  const op = "snapshot";
+  if (!isValidName(owner) || !isValidName(app)) return invalid(op, owner, app);
+  const live = liveDir(sd, owner, app);
+  if (!existsSync(live))
+    return Result.err(
+      new DataError({ message: `no data dir for ${owner}/${app}`, op }),
+    );
+
+  return Result.tryPromise({
+    try: async () => {
+      const dbFile = join(live, "app.db");
+      if (existsSync(dbFile)) checkpoint(dbFile);
+
+      const parent = snapshotsDir(sd, owner, app);
+      await mkdir(parent, { recursive: true });
+      let ms = Date.now();
+      while (existsSync(join(parent, String(ms)))) ms++;
+      const id = String(ms);
+      const dir = join(parent, id);
+
+      await cloneDir(live, dir);
+      // Post-checkpoint the wal is empty and the shm is a live-session
+      // artifact; a cloned shm can force readonly-recovery and fail the
+      // readonly verification open. The snapshot is app.db as of the
+      // checkpoint — exactly the crash-consistency we promise.
+      await rm(join(dir, "app.db-wal"), { force: true });
+      await rm(join(dir, "app.db-shm"), { force: true });
+
+      const snapDb = join(dir, "app.db");
+      if (existsSync(snapDb)) {
+        const failure = verifySnapshotDb(snapDb);
+        if (failure !== null) {
+          await rm(dir, { recursive: true, force: true });
+          throw new Error(`snapshot verification failed: ${failure}`);
+        }
+      }
+      return { id, dir };
+    },
+    catch: (cause) => new DataError({ message: String(cause), op }),
+  });
+}
+
+export async function listSnapshots(
+  sd: StateDir,
+  owner: string,
+  app: string,
+): Promise<Result<string[], DataError>> {
+  const op = "listSnapshots";
+  if (!isValidName(owner) || !isValidName(app)) return invalid(op, owner, app);
+  const dir = snapshotsDir(sd, owner, app);
+  if (!existsSync(dir)) return Result.ok([]);
+  return Result.tryPromise({
+    try: async () => {
+      const entries = await readdir(dir);
+      return entries.sort((a, b) => Number(a) - Number(b));
+    },
+    catch: (cause) => new DataError({ message: String(cause), op }),
+  });
+}
+
+/** Replaces the live data dir with the snapshot (app must be stopped by caller). */
+export async function restore(
+  sd: StateDir,
+  owner: string,
+  app: string,
+  snapshotId: string,
+): Promise<Result<void, DataError>> {
+  const op = "restore";
+  if (!isValidName(owner) || !isValidName(app)) return invalid(op, owner, app);
+  if (!/^\d+$/.test(snapshotId))
+    return Result.err(
+      new DataError({ message: `invalid snapshot id: ${snapshotId}`, op }),
+    );
+  const snapDir = join(snapshotsDir(sd, owner, app), snapshotId);
+  if (!existsSync(snapDir))
+    return Result.err(
+      new DataError({
+        message: `snapshot ${snapshotId} not found for ${owner}/${app}`,
+        op,
+      }),
+    );
+  const live = liveDir(sd, owner, app);
+  return Result.tryPromise({
+    try: async () => {
+      await rm(live, { recursive: true, force: true });
+      await cp(snapDir, live, { recursive: true });
+      // Restore the container-writable modes (see provisionDataDir).
+      await chmod(live, 0o777);
+      const files = join(live, "files");
+      if (existsSync(files)) await chmod(files, 0o777);
+    },
+    catch: (cause) => new DataError({ message: String(cause), op }),
+  });
+}
