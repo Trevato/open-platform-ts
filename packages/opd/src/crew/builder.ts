@@ -58,6 +58,17 @@ async function makeWritable(dir: string): Promise<void> {
   await p.exited;
 }
 
+async function revParse(checkout: string): Promise<string> {
+  const p = Bun.spawn(
+    ["git", "-c", "safe.directory=*", "-C", checkout, "rev-parse", "HEAD"],
+    {
+      stdout: "pipe",
+      stderr: "ignore",
+    },
+  );
+  return (await new Response(p.stdout).text()).trim();
+}
+
 async function git(cwd: string, args: string[]): Promise<void> {
   // safe.directory=* : the containerized agent (uid 1000) writes .git objects
   // into a checkout the driver (operator uid) owns — git would otherwise refuse
@@ -88,13 +99,21 @@ export interface BuilderDeps {
  * Build the change described by an issue: clone → feature branch → the agent
  * edits + commits → the driver pushes + opens a PR (which auto-creates a
  * preview env with forked data). Returns the PR number.
+ *
+ * In rework mode (opts.rework), it checks out the EXISTING PR branch and hands
+ * the agent the reviewer's blockers to fix — a new commit on the same branch
+ * updates the open PR (no new PR), which re-triggers the preview + review.
  */
 export async function runBuilder(
   deps: BuilderDeps,
   issue: IssueRow,
+  opts: {
+    rework?: { verdict: string; prNumber: number; attempt: number };
+  } = {},
 ): Promise<Result<{ prNumber: number; costUsd: number }, BuilderError>> {
   const fail = (step: string) => (cause: unknown) =>
     new BuilderError({ message: String(cause), step });
+  const rework = opts.rework;
 
   // Work under $HOME (VM-backed engines only share $HOME) though the agent
   // never touches Docker — keeps every op's scratch space consistent.
@@ -110,8 +129,14 @@ export async function runBuilder(
         await git(work, ["clone", "-q", bare, checkout]);
 
         const branch = `agent/issue-${issue.number}`;
-        // A fresh branch each attempt; overwrite a stale one from a prior try.
-        await git(checkout, ["checkout", "-q", "-B", branch]);
+        // Rework continues the EXISTING PR branch (keeping prior work); a fresh
+        // build starts a new branch off main, overwriting any stale one.
+        await git(
+          checkout,
+          rework
+            ? ["checkout", "-q", "-B", branch, `origin/${branch}`]
+            : ["checkout", "-q", "-B", branch],
+        );
 
         // The spec the agent reads. Kept out of the commit (agents shouldn't
         // ship ISSUE.md) via .git/info/exclude.
@@ -132,12 +157,20 @@ export async function runBuilder(
         if (agent.status === "error")
           throw new Error(`load builder: ${agent.error.message}`);
 
-        deps.onProgress?.("🏗️ builder starting");
+        // Capture the branch head so rework can detect a no-op fix.
+        const headBefore = await revParse(checkout);
+
+        deps.onProgress?.(
+          rework
+            ? `🔧 reworking (attempt ${rework.attempt})`
+            : "🏗️ builder starting",
+        );
         const run = await deps.runAgent({
           cwd: checkout,
           systemPrompt: agent.value.instructions,
-          prompt:
-            "Read ISSUE.md and implement exactly what it asks in this app, then commit your work locally with a clear message. Do not push; do not open a pull request.",
+          prompt: rework
+            ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers in this app, keeping everything else working (auth, the OIDC login, the JSON/HTML contract, existing data). Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.`
+            : "Read ISSUE.md and implement exactly what it asks in this app, then commit your work locally with a clear message. Do not push; do not open a pull request.",
           oauthToken: deps.oauthToken,
           allowedTools: BUILDER_ALLOWED_TOOLS,
           disallowedTools: BUILDER_DENIED_TOOLS,
@@ -179,31 +212,40 @@ export async function runBuilder(
           ]);
         }
 
-        // No commits ahead of the base ⇒ the agent changed nothing; a PR would
-        // be empty. Fail loudly rather than open a no-op PR.
-        const revlist = Bun.spawn(
-          [
-            "git",
-            "-c",
-            "safe.directory=*",
-            "-C",
-            checkout,
-            "rev-list",
-            "--count",
-            "origin/main..HEAD",
-          ],
-          { stdout: "pipe", stderr: "ignore" },
-        );
-        const ahead = Number(
-          (await new Response(revlist.stdout).text()).trim() || "0",
-        );
-        if (ahead === 0)
-          throw new Error(
-            "agent produced no changes (no commits ahead of main)",
+        // The agent changed nothing ⇒ fail loudly rather than push an empty
+        // change. Fresh build: no commits ahead of main. Rework: the branch
+        // head didn't move.
+        if (rework) {
+          if ((await revParse(checkout)) === headBefore)
+            throw new Error(
+              "rework produced no changes (reviewer would fail again)",
+            );
+        } else {
+          const revlist = Bun.spawn(
+            [
+              "git",
+              "-c",
+              "safe.directory=*",
+              "-C",
+              checkout,
+              "rev-list",
+              "--count",
+              "origin/main..HEAD",
+            ],
+            { stdout: "pipe", stderr: "ignore" },
           );
+          const ahead = Number(
+            (await new Response(revlist.stdout).text()).trim() || "0",
+          );
+          if (ahead === 0)
+            throw new Error(
+              "agent produced no changes (no commits ahead of main)",
+            );
+        }
 
-        // Driver push (local bare path — no network credential) + PR. Opening
-        // the PR auto-creates a preview env with forked prod data.
+        // Driver push (local bare path — no network credential). A fresh build
+        // opens a PR (auto-creating a preview with forked data); a rework just
+        // updates the existing PR's branch, which re-triggers preview + review.
         await git(checkout, [
           "push",
           "-q",
@@ -211,6 +253,8 @@ export async function runBuilder(
           "origin",
           `${branch}:${branch}`,
         ]);
+        if (rework)
+          return { prNumber: rework.prNumber, costUsd: run.value.costUsd };
         const pr = await deps.forge.createPr(
           deps.systemActor,
           issue.owner,

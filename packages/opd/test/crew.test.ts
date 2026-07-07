@@ -240,12 +240,15 @@ describe("dispatcher", () => {
     expect(comments).toContain("Merged PR #1");
   });
 
-  test("review FAILs → PR left open for a human, not merged", async () => {
+  test("review FAILs with rework disabled → PR left open for a human", async () => {
     const h = await harness();
     const d = new Dispatcher(
       dispatcherReviewDeps(
         h,
         fakeCrew("❌ FAIL — stored XSS in the message field"),
+        {
+          maxRework: 0,
+        },
       ),
     );
     h.store.createIssue("plat", "app", {
@@ -269,6 +272,104 @@ describe("dispatcher", () => {
       .join("\n");
     expect(comments).toContain("❌ FAIL");
     expect(comments).toContain("left open for a human");
+  });
+
+  test("rework: ❌ then a fix that passes → auto-merges + ships", async () => {
+    const h = await harness();
+    let builds = 0;
+    let reviews = 0;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md"))) {
+        reviews++;
+        // fail the first review, pass after the rework
+        return Result.ok({
+          ok: true,
+          result:
+            reviews === 1 ? "❌ FAIL — missing auth gate" : "✅ PASS — fixed",
+          costUsd: 0.02,
+          numTurns: 2,
+        });
+      }
+      builds++;
+      // change the branch head each pass so rework isn't a no-op
+      await writeFile(join(run.cwd, "FEATURE.md"), `build ${builds}\n`);
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.03,
+        numTurns: 2,
+      });
+    };
+    const d = new Dispatcher(
+      dispatcherReviewDeps(h, runAgent, { maxRework: 1 }),
+    );
+    h.store.createIssue("plat", "app", {
+      title: "widget",
+      body: "b",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    await d.tick();
+    await settle(h);
+
+    expect(builds).toBe(2); // initial build + one rework
+    expect(reviews).toBe(2); // reviewed before and after the fix
+    expect(h.store.getPr("plat", "app", 1)?.state).toBe("merged");
+    const issue = h.store.getIssue("plat", "app", 1)!;
+    expect(issue.labels.split(",")).toContain("agent-shipped");
+    const comments = h.store
+      .listComments("plat", "app", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("Reworking to fix");
+    expect(comments).toContain("Merged PR #1");
+  });
+
+  test("rework exhausted: persistent ❌ → parked after N attempts", async () => {
+    const h = await harness();
+    let builds = 0;
+    let reviews = 0;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md"))) {
+        reviews++;
+        return Result.ok({
+          ok: true,
+          result: "❌ FAIL — still broken",
+          costUsd: 0.02,
+          numTurns: 2,
+        });
+      }
+      builds++;
+      await writeFile(join(run.cwd, "FEATURE.md"), `build ${builds}\n`);
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.03,
+        numTurns: 2,
+      });
+    };
+    const d = new Dispatcher(
+      dispatcherReviewDeps(h, runAgent, { maxRework: 1 }),
+    );
+    h.store.createIssue("plat", "app", {
+      title: "widget",
+      body: "b",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    await d.tick();
+    await settle(h);
+
+    expect(builds).toBe(2); // initial + one rework, then gives up
+    expect(reviews).toBe(2);
+    expect(h.store.getPr("plat", "app", 1)?.state).toBe("open");
+    const issue = h.store.getIssue("plat", "app", 1)!;
+    expect(issue.labels.split(",")).toContain("agent-review-failed");
+    const comments = h.store
+      .listComments("plat", "app", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("still finds blockers after 2 attempts");
   });
 
   test("preview never comes up → fails without reviewing", async () => {

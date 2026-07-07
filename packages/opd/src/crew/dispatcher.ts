@@ -9,9 +9,11 @@ import { runReviewer } from "./reviewer.ts";
 const WORK_LABEL = "agent-work";
 const BUILDING_LABEL = "agent-building";
 const REVIEWING_LABEL = "agent-reviewing";
+const REWORK_LABEL = "agent-reworking";
 const SHIPPED_LABEL = "agent-shipped";
 const FAILED_LABEL = "agent-failed";
 const REVIEW_FAILED_LABEL = "agent-review-failed";
+const DEFAULT_MAX_REWORK = 2;
 
 export interface DispatcherDeps {
   sd: StateDir;
@@ -36,6 +38,9 @@ export interface DispatcherDeps {
   kickReconciler: () => void;
   /** Override the "is the preview serving?" probe (tests inject a stub). */
   previewIsUp?: (previewHost: string) => Promise<boolean>;
+  /** How many times to feed a ❌ verdict back to the builder before parking
+   *  for a human. 0 disables rework. Defaults to 2. */
+  maxRework?: number;
   log: Log;
 }
 
@@ -166,7 +171,7 @@ export class Dispatcher {
     this.setLabels(issue, [...labels, REVIEWING_LABEL]);
     this.comment(
       issue,
-      `🏗️ Opened PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). Preview spinning up; the reviewer will browser-test it.`,
+      `🏗️ Opened PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). Preview spinning up; the reviewer will test it.`,
     );
     log.info("crew: PR opened", {
       issue: this.key(issue),
@@ -174,101 +179,218 @@ export class Dispatcher {
       cost: built.value.costUsd,
     });
 
-    // Wait for the preview to actually serve before reviewing it.
-    const previewUp = await this.waitForPreview(previewHost);
-    if (!previewUp) {
-      this.setLabels(issue, [...labels, FAILED_LABEL]);
+    // Build → review → (rework on ❌)* until it passes or we give up.
+    const maxRework = this.deps.maxRework ?? DEFAULT_MAX_REWORK;
+    let attempt = 0;
+    if (!(await this.waitForPreview(previewHost)))
+      return this.park(
+        issue,
+        labels,
+        pr,
+        "the preview never came up",
+        FAILED_LABEL,
+      );
+
+    while (true) {
       this.comment(
         issue,
-        `❌ PR #${pr}'s preview never came up — a human should look. PR left open.`,
+        "🔍 Reviewer testing the preview (sign-in, feature, injection, bad input)…",
       );
-      return;
-    }
-
-    // Review: a caged agent tries to break the live preview and returns a verdict.
-    this.comment(
-      issue,
-      "🔍 Reviewer testing the preview (sign-in, feature, injection, bad input)…",
-    );
-    const verdict = await runReviewer(
-      {
-        domain: this.deps.domain,
-        httpsPort: this.deps.httpsPort,
-        genesisDir: this.deps.genesisDir,
-        caFile: this.deps.caFile,
-        runAgent: this.deps.runAgent,
-        oauthToken: this.deps.oauthToken,
-        qaUser: this.deps.qaUser,
-        qaPassword: this.deps.qaPassword,
-        log,
-        onProgress: (line) => this.comment(issue, line),
-      },
-      {
+      const verdict = await runReviewer(this.reviewerDeps(issue), {
         owner: issue.owner,
         repo: issue.repo,
         prNumber: pr,
         issueBody: issue.body,
         issueTitle: issue.title,
-      },
-    );
-
-    if (verdict.status === "error") {
-      this.setLabels(issue, [...labels, FAILED_LABEL]);
+      });
+      if (verdict.status === "error")
+        return this.park(
+          issue,
+          labels,
+          pr,
+          `the review couldn't run (${verdict.error.message})`,
+          FAILED_LABEL,
+        );
+      const v = verdict.value;
       this.comment(
         issue,
-        `❌ Review couldn't run: ${verdict.error.message}. PR #${pr} left open for a human.`,
+        `${v.line}\n\n(reviewer cost $${v.costUsd.toFixed(2)})`,
       );
-      return;
-    }
 
-    const v = verdict.value;
-    this.comment(
-      issue,
-      `${v.line}\n\n(reviewer cost $${v.costUsd.toFixed(2)})`,
-    );
-
-    if (v.kind === "pass" || v.kind === "concerns") {
-      // Auto-merge on a pass → ship to prod + tear down the preview.
-      const merged = await this.deps.forge.mergePr(
-        this.deps.systemActor,
-        issue.owner,
-        issue.repo,
-        pr,
-      );
-      if (merged.status === "error") {
-        this.setLabels(issue, [...labels, FAILED_LABEL]);
+      // ✅/⚠️ → auto-merge, ship, done.
+      if (v.kind === "pass" || v.kind === "concerns") {
+        const merged = await this.deps.forge.mergePr(
+          this.deps.systemActor,
+          issue.owner,
+          issue.repo,
+          pr,
+        );
+        if (merged.status === "error")
+          return this.park(
+            issue,
+            labels,
+            pr,
+            `merge failed after a passing review (${merged.error.message})`,
+            FAILED_LABEL,
+          );
+        this.deps.kickReconciler(); // ship the merge + tear down the preview
+        this.setLabels(issue, [...labels, SHIPPED_LABEL]);
+        this.deps.store.setIssueState(
+          issue.owner,
+          issue.repo,
+          issue.number,
+          "closed",
+        );
         this.comment(
           issue,
-          `Reviewer passed, but merge failed: ${merged.error.message}. PR #${pr} left open.`,
+          `🚀 Merged PR #${pr} and shipping to production. Issue closed.`,
         );
+        log.info("crew: shipped", {
+          issue: this.key(issue),
+          pr,
+          attempts: attempt + 1,
+        });
         return;
       }
-      this.deps.kickReconciler(); // ship the merge + tear down the preview
-      this.setLabels(issue, [...labels, SHIPPED_LABEL]);
-      this.deps.store.setIssueState(
-        issue.owner,
-        issue.repo,
-        issue.number,
-        "closed",
-      );
+
+      // UNTESTABLE → a human is needed; we can't trust a fix we can't verify.
+      if (v.kind === "untestable")
+        return this.park(
+          issue,
+          labels,
+          pr,
+          "the reviewer couldn't test the preview",
+          REVIEW_FAILED_LABEL,
+        );
+
+      // ❌ FAIL — rework if attempts remain, else park.
+      if (attempt >= maxRework) {
+        this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
+        this.comment(
+          issue,
+          `The reviewer still finds blockers after ${attempt + 1} attempt${attempt ? "s" : ""}. PR #${pr} is left open for a human.`,
+        );
+        log.info("crew: rework exhausted", {
+          issue: this.key(issue),
+          pr,
+          attempts: attempt + 1,
+        });
+        return;
+      }
+      attempt++;
+      this.setLabels(issue, [...labels, REWORK_LABEL]);
       this.comment(
         issue,
-        `🚀 Merged PR #${pr} and shipping to production. Issue closed.`,
+        `🔧 Reworking to fix the reviewer's blockers (attempt ${attempt}/${maxRework})…`,
       );
-      log.info("crew: shipped", { issue: this.key(issue), pr });
-    } else {
-      // ❌ FAIL / UNTESTABLE / unclear verdict — leave the PR for a human.
-      this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
-      this.comment(
-        issue,
-        `The reviewer did not pass this. PR #${pr} is left open for a human to decide.`,
-      );
-      log.info("crew: review not passed", {
-        issue: this.key(issue),
-        pr,
-        verdict: v.kind,
+      const sinceTs = this.now();
+      const reworked = await runBuilder(this.builderDeps(issue), issue, {
+        rework: { verdict: v.line, prNumber: pr, attempt },
       });
+      if (reworked.status === "error")
+        return this.park(
+          issue,
+          labels,
+          pr,
+          `the rework failed (${reworked.error.message})`,
+          FAILED_LABEL,
+        );
+      this.deps.kickReconciler(); // rebuild the preview from the updated branch
+      this.setLabels(issue, [...labels, REVIEWING_LABEL]);
+      this.comment(
+        issue,
+        `Pushed the fix to PR #${pr}; rebuilding the preview to re-review…`,
+      );
+      if (
+        !(await this.waitForPreviewRebuild(
+          issue.owner,
+          issue.repo,
+          pr,
+          sinceTs,
+        ))
+      )
+        return this.park(
+          issue,
+          labels,
+          pr,
+          "the reworked preview never came up",
+          FAILED_LABEL,
+        );
     }
+  }
+
+  private park(
+    issue: IssueRow,
+    labels: string[],
+    pr: number,
+    why: string,
+    label: string,
+  ): void {
+    this.setLabels(issue, [...labels, label]);
+    this.comment(
+      issue,
+      `⚠️ Parked: ${why}. PR #${pr} is left open for a human.`,
+    );
+    this.deps.log.info("crew: parked", { issue: this.key(issue), pr, why });
+  }
+
+  private builderDeps(issue: IssueRow) {
+    return {
+      sd: this.deps.sd,
+      forge: this.deps.forge,
+      domain: this.deps.domain,
+      genesisDir: this.deps.genesisDir,
+      systemActor: this.deps.systemActor,
+      runAgent: this.deps.runAgent!,
+      oauthToken: this.deps.oauthToken!,
+      log: this.deps.log,
+      onProgress: (line: string) => this.comment(issue, line),
+    };
+  }
+
+  private reviewerDeps(issue: IssueRow) {
+    return {
+      domain: this.deps.domain,
+      httpsPort: this.deps.httpsPort,
+      genesisDir: this.deps.genesisDir,
+      caFile: this.deps.caFile,
+      runAgent: this.deps.runAgent!,
+      oauthToken: this.deps.oauthToken!,
+      qaUser: this.deps.qaUser,
+      qaPassword: this.deps.qaPassword,
+      log: this.deps.log,
+      onProgress: (line: string) => this.comment(issue, line),
+    };
+  }
+
+  // Wall clock — overridable so tests don't depend on real time.
+  private now(): number {
+    return Date.now();
+  }
+
+  /** After a rework push, wait for the reconciler to actually REBUILD the
+   *  preview (a fresh preview-ready/preview-failed event) so the reviewer tests
+   *  the new code, not the still-running old container. */
+  private async waitForPreviewRebuild(
+    owner: string,
+    repo: string,
+    pr: number,
+    sinceTs: number,
+  ): Promise<boolean> {
+    const previewHost = `pr-${pr}-${repo}-${owner}.${this.deps.domain}`;
+    if (this.deps.previewIsUp) return this.deps.previewIsUp(previewHost);
+    const ready = `preview-ready (pr-${pr})`;
+    const failed = `preview-failed (pr-${pr})`;
+    for (let i = 0; i < 150; i++) {
+      const ev = this.deps.store
+        .listEvents(owner, repo, 20)
+        .find(
+          (e) => e.ts > sinceTs && (e.phase === ready || e.phase === failed),
+        );
+      if (ev) return ev.phase === ready;
+      await Bun.sleep(2000);
+    }
+    return false;
   }
 
   /** Poll the preview host until it serves (or give up). Reaches it via the
