@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { isValidName, newId, newToken, randomHex, sha256Hex } from "@op/core";
+import {
+  isReservedAppName,
+  isReservedName,
+  isValidName,
+  newId,
+  newToken,
+  randomHex,
+  sha256Hex,
+} from "@op/core";
 
 describe("ids", () => {
   test("newId shape and uniqueness", () => {
@@ -43,5 +51,27 @@ describe("name validation (fs path / DNS label / git path safety)", () => {
     "a/b",
   ])("rejects %s", (s) => {
     expect(isValidName(s)).toBe(false);
+  });
+});
+
+describe("reserved names", () => {
+  test.each(["sys", "plat", "admin", "api", "oauth", "PLAT"])(
+    "reserves %s",
+    (s) => {
+      expect(isReservedName(s)).toBe(true);
+    },
+  );
+
+  test.each(["ada", "hello", "my-app"])("allows %s", (s) => {
+    expect(isReservedName(s)).toBe(false);
+  });
+
+  test("app names can't collide with preview hosts (pr-<n> prefix)", () => {
+    expect(isReservedAppName("pr-1-shop")).toBe(true);
+    expect(isReservedAppName("pr-42")).toBe(true);
+    expect(isReservedAppName("plat")).toBe(true); // reserved names too
+    expect(isReservedAppName("preview")).toBe(false); // "pr" not followed by a digit is fine
+    expect(isReservedAppName("printer")).toBe(false);
+    expect(isReservedAppName("hello")).toBe(false);
   });
 });

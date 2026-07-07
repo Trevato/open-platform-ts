@@ -1,4 +1,10 @@
-import { isValidName, newToken, Result, sha256Hex } from "@op/core";
+import {
+  isReservedName,
+  isValidName,
+  newToken,
+  Result,
+  sha256Hex,
+} from "@op/core";
 import type { GitHost } from "@op/git";
 import type { PullRequestRow, RepoRow, Store, UserRow } from "@op/store";
 import { ForgeError } from "./errors.ts";
@@ -27,12 +33,22 @@ export class Forge {
   async createUser(
     username: string,
     password: string,
-    opts?: { admin?: boolean },
+    opts?: { admin?: boolean; system?: boolean },
   ): Promise<Result<UserRow, ForgeError>> {
     if (!isValidName(username)) {
       return Result.err(
         new ForgeError({
           message: `invalid username: ${username}`,
+          code: "invalid",
+        }),
+      );
+    }
+    // Reserved names are platform-owned; only the platform itself (genesis,
+    // system:true) may take one. Self-serve callers can never claim them.
+    if (!opts?.system && isReservedName(username)) {
+      return Result.err(
+        new ForgeError({
+          message: `'${username}' is reserved`,
           code: "invalid",
         }),
       );

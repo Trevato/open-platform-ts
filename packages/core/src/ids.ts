@@ -43,3 +43,32 @@ export const NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,36}[a-z0-9])?$/;
 export function isValidName(s: string): boolean {
   return NAME_RE.test(s) && !s.includes("--");
 }
+
+// Names the platform owns or that would shadow a platform route/host. Reserved
+// for user/org names so self-serve signup can never impersonate the platform
+// (e.g. a "plat" org) or claim a well-known host.
+export const RESERVED_NAMES: ReadonlySet<string> = new Set([
+  "sys",
+  "plat",
+  "admin",
+  "root",
+  "api",
+  "oauth",
+  "login",
+  "logout",
+  "www",
+  "mail",
+  "internal",
+  "well-known",
+]);
+
+export function isReservedName(s: string): boolean {
+  return RESERVED_NAMES.has(s.toLowerCase());
+}
+
+// App names additionally must not collide with a preview host. A preview lives
+// at pr-<n>-<app>-<owner>.<domain>; an app literally named "pr-1-shop" would
+// produce an identical host, so the "pr-" + digits prefix is off-limits.
+export function isReservedAppName(s: string): boolean {
+  return isReservedName(s) || /^pr-\d/.test(s);
+}

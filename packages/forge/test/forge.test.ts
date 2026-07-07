@@ -50,6 +50,16 @@ describe("users + passwords", () => {
     const empty = await forge.createUser("bob", "");
     expect(empty.status === "error" && empty.error.code).toBe("invalid");
   });
+
+  test("reserved usernames are refused unless system-created", async () => {
+    const { forge } = fresh();
+    const denied = await forge.createUser("plat", "pw");
+    expect(denied.status === "error" && denied.error.code).toBe("invalid");
+    // the platform itself may take a reserved name
+    expect(
+      (await forge.createUser("plat", "pw", { system: true })).status,
+    ).toBe("ok");
+  });
 });
 
 describe("authenticate", () => {
@@ -139,7 +149,7 @@ describe("authorize (fail-closed)", () => {
     const ada = Result.unwrap(await forge.createUser("ada", "pw"));
     const bob = Result.unwrap(await forge.createUser("bob", "pw"));
     const root = Result.unwrap(
-      await forge.createUser("root", "pw", { admin: true }),
+      await forge.createUser("root", "pw", { admin: true, system: true }),
     );
     Result.unwrap(await forge.createRepo(ada, "ada", "app"));
 
@@ -177,7 +187,7 @@ describe("repos", () => {
     const { forge } = fresh();
     const ada = Result.unwrap(await forge.createUser("ada", "pw"));
     const root = Result.unwrap(
-      await forge.createUser("root", "pw", { admin: true }),
+      await forge.createUser("root", "pw", { admin: true, system: true }),
     );
     const denied = await forge.createRepo(ada, "root", "x");
     expect(denied.status === "error" && denied.error.code).toBe("unauthorized");

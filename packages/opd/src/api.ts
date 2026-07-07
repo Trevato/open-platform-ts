@@ -1,5 +1,5 @@
 import type { Log, StateDir } from "@op/core";
-import { buildLogPath, isValidName } from "@op/core";
+import { buildLogPath, isReservedAppName, isValidName } from "@op/core";
 import { listSnapshots, snapshot } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { Forge } from "@op/forge";
@@ -43,6 +43,13 @@ export function apiRouter(
       const name = body?.name;
       if (!name || !isValidName(name))
         return json({ error: "invalid app name" }, 400);
+      if (isReservedAppName(name))
+        return json(
+          {
+            error: `'${name}' is reserved (names starting 'pr-<n>' collide with preview hosts)`,
+          },
+          400,
+        );
 
       const repo = await deps.forge.createFromTemplate(user, TEMPLATE, name);
       if (repo.status === "error") {

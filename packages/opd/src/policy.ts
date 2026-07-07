@@ -1,4 +1,4 @@
-import { isValidName, Result, TaggedError } from "@op/core";
+import { isReservedAppName, isValidName, Result, TaggedError } from "@op/core";
 
 export class PolicyViolation extends TaggedError("PolicyViolation")<{
   reason: string;
@@ -33,6 +33,7 @@ export function admitSpec(
     return deny("invalid owner");
   if (typeof s["app"] !== "string" || !isValidName(s["app"]))
     return deny("invalid app name");
+  if (isReservedAppName(s["app"])) return deny("reserved app name");
 
   const repo = s["repo"] as Record<string, unknown> | undefined;
   if (

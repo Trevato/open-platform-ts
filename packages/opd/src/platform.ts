@@ -184,7 +184,10 @@ export class Platform {
           const password = plain["ADMIN_PASSWORD"];
           if (!password) throw new Error("secrets file has no ADMIN_PASSWORD");
           Result.unwrap(
-            await forge.createUser(ADMIN_USER, password, { admin: true }),
+            await forge.createUser(ADMIN_USER, password, {
+              admin: true,
+              system: true,
+            }),
           );
           freshAdminPassword = password;
         }
