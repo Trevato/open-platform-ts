@@ -45,8 +45,23 @@ const BUILDER_DENIED_TOOLS = [
   "WebFetch",
 ];
 
+async function makeWritable(dir: string): Promise<void> {
+  // a+rwX so the container's uid-1000 agent can write every file + create in
+  // every dir. Capital X adds execute ONLY to directories and already-
+  // executable files, so a plain 0644 source file stays non-executable — git
+  // records the execute bit, and flipping it would look like a spurious diff.
+  const p = Bun.spawn(["chmod", "-R", "a+rwX", dir], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await p.exited;
+}
+
 async function git(cwd: string, args: string[]): Promise<void> {
-  const p = Bun.spawn(["git", ...args], {
+  // safe.directory=* : the containerized agent (uid 1000) writes .git objects
+  // into a checkout the driver (operator uid) owns — git would otherwise refuse
+  // the mixed ownership as "dubious".
+  const p = Bun.spawn(["git", "-c", "safe.directory=*", ...args], {
     cwd,
     stdout: "ignore",
     stderr: "pipe",
@@ -108,6 +123,10 @@ export async function runBuilder(
           "ISSUE.md\n.op-claude-cfg/\n",
         );
 
+        // The agent runs as a non-root container user (uid 1000); make the whole
+        // checkout (source + .git) writable so it can edit and commit.
+        await makeWritable(checkout);
+
         const agent = await loadAgent(join(deps.genesisDir, "crew"), "builder");
         if (agent.status === "error")
           throw new Error(`load builder: ${agent.error.message}`);
@@ -135,7 +154,15 @@ export async function runBuilder(
         // final commit doesn't lose work.
         await git(checkout, ["add", "-A"]);
         const dirty = Bun.spawn(
-          ["git", "-C", checkout, "status", "--porcelain"],
+          [
+            "git",
+            "-c",
+            "safe.directory=*",
+            "-C",
+            checkout,
+            "status",
+            "--porcelain",
+          ],
           { stdout: "pipe" },
         );
         if ((await new Response(dirty.stdout).text()).trim()) {
@@ -154,7 +181,16 @@ export async function runBuilder(
         // No commits ahead of the base ⇒ the agent changed nothing; a PR would
         // be empty. Fail loudly rather than open a no-op PR.
         const revlist = Bun.spawn(
-          ["git", "-C", checkout, "rev-list", "--count", "origin/main..HEAD"],
+          [
+            "git",
+            "-c",
+            "safe.directory=*",
+            "-C",
+            checkout,
+            "rev-list",
+            "--count",
+            "origin/main..HEAD",
+          ],
           { stdout: "pipe", stderr: "ignore" },
         );
         const ahead = Number(

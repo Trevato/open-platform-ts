@@ -29,8 +29,8 @@ import { apiRouter } from "./api.ts";
 import { consoleRouter } from "./console/index.ts";
 import { oidcRouter } from "./oidc.ts";
 import { ensureSigningKey } from "./oidc-clients.ts";
-import { claudeRunner } from "@op/crew";
 import { Dispatcher } from "./crew/dispatcher.ts";
+import { makeContainerRunner } from "./crew/container-runner.ts";
 import {
   commitFiles,
   readSecretsFile,
@@ -292,7 +292,13 @@ export class Platform {
             is_admin: 1,
             created_at: 0,
           },
-          runAgent: claudeToken ? claudeRunner : null,
+          runAgent: claudeToken
+            ? makeContainerRunner(
+                engine,
+                opts.genesisDir ?? defaultGenesisDir(),
+                log,
+              )
+            : null,
           oauthToken: claudeToken,
           kickReconciler: () => void reconciler.kickAll(),
           log,
