@@ -71,6 +71,7 @@ export interface RunAppSpec {
   dataDir?: string; // bind-mounted at /data
   caFile?: string; // host CA path, bind-mounted read-only at /etc/op/ca.crt
   extraHosts?: string[]; // Docker ExtraHosts, e.g. "plat.localtest.me:host-gateway"
+  preview?: string; // op.preview label (a PR number) for preview containers
   memoryBytes?: number;
   nanoCpus?: number;
   user?: string;
@@ -254,6 +255,7 @@ export class Engine {
           "op.platform": spec.platformId,
           "op.owner": spec.owner,
           "op.app": spec.app,
+          ...(spec.preview ? { "op.preview": spec.preview } : {}),
         },
         HostConfig: hostConfig,
       }),
@@ -332,6 +334,7 @@ export class Engine {
         id: string;
         owner: string;
         app: string;
+        preview: string | null;
         image: string;
         state: string;
         hostPort: number | null;
@@ -355,6 +358,7 @@ export class Engine {
           id: c.Id,
           owner: c.Labels["op.owner"] ?? "",
           app: c.Labels["op.app"] ?? "",
+          preview: c.Labels["op.preview"] ?? null,
           image: c.Image,
           state: c.State,
           hostPort: published?.PublicPort ?? null,

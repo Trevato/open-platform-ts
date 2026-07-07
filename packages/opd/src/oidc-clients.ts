@@ -24,17 +24,21 @@ export interface AppClientCreds {
   redirectUri: string;
 }
 
-// One client per app: stable id, one redirect URI (the app's callback). Called
-// only on an actual deploy, so minting a fresh secret and injecting it into the
-// new container's env in the same converge keeps the two in lockstep — a
-// running app never holds a secret the store has rotated out from under it.
+// One client per deployment target: stable id, one redirect URI (its callback).
+// Called only on an actual deploy, so minting a fresh secret and injecting it
+// into the new container's env in the same converge keeps the two in lockstep —
+// a running app never holds a secret the store has rotated out from under it.
+// A preview gets a DISTINCT client id so its redirect never clobbers prod's.
 export async function provisionAppClient(
   store: Store,
   owner: string,
   app: string,
   appOrigin: string,
+  preview?: string,
 ): Promise<AppClientCreds> {
-  const clientId = `app-${owner}-${app}`;
+  const clientId = preview
+    ? `app-${owner}-${app}-${preview}`
+    : `app-${owner}-${app}`;
   const redirectUri = `${appOrigin}/auth/callback`;
   const clientSecret = `op_cs_${randomHex(24)}`;
   store.upsertClient({

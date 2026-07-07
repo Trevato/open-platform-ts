@@ -5,7 +5,14 @@ import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Result, stateDir } from "@op/core";
-import { listSnapshots, provisionDataDir, restore, snapshot } from "@op/data";
+import {
+  branchData,
+  deleteBranchData,
+  listSnapshots,
+  provisionDataDir,
+  restore,
+  snapshot,
+} from "@op/data";
 
 const root = mkdtempSync(join(tmpdir(), "op-data-"));
 const sd = stateDir(root);
@@ -49,6 +56,56 @@ describe("provisionDataDir", () => {
   test("rejects invalid names", async () => {
     const res = await provisionDataDir(sd, "../evil", "app");
     expect(res.status).toBe("error");
+  });
+});
+
+describe("branchData (copy-on-write data branch)", () => {
+  test("a branch forks prod's rows but diverges independently", async () => {
+    const prod = Result.unwrap(await provisionDataDir(sd, "carol", "shop"));
+    const db = openLiveDb(prod);
+    db.run("INSERT INTO t (v) VALUES ('base1'), ('base2')");
+    db.close();
+
+    const branch = Result.unwrap(await branchData(sd, "carol", "shop", "pr-1"));
+    expect(branch).toContain("shop@pr-1");
+    // The branch starts with prod's rows...
+    expect(rowCount(join(branch, "app.db"))).toBe(2);
+
+    // ...then mutate the branch and prod independently.
+    const bdb = new Database(join(branch, "app.db"));
+    bdb.run("INSERT INTO t (v) VALUES ('branch-only')");
+    bdb.close();
+    const pdb = new Database(join(prod, "app.db"));
+    pdb.run("INSERT INTO t (v) VALUES ('prod-only-1'), ('prod-only-2')");
+    pdb.close();
+
+    expect(rowCount(join(branch, "app.db"))).toBe(3); // 2 base + 1 branch
+    expect(rowCount(join(prod, "app.db"))).toBe(4); // 2 base + 2 prod
+
+    // Idempotent: re-branching reuses the existing dir (does not re-clone).
+    const again = Result.unwrap(await branchData(sd, "carol", "shop", "pr-1"));
+    expect(again).toBe(branch);
+    expect(rowCount(join(branch, "app.db"))).toBe(3);
+
+    // files/ ride along in the clone.
+    const filesBranch = Result.unwrap(
+      await branchData(sd, "carol", "shop", "pr-2"),
+    );
+    await writeFile(join(prod, "files", "a.txt"), "x");
+    const withFiles = Result.unwrap(
+      await branchData(sd, "carol", "shop", "pr-3"),
+    );
+    expect(existsSync(join(withFiles, "files"))).toBe(true);
+    void filesBranch;
+
+    Result.unwrap(await deleteBranchData(sd, "carol", "shop", "pr-1"));
+    expect(existsSync(branch)).toBe(false);
+  });
+
+  test("branching an app with no prod data yields an empty branch dir", async () => {
+    const branch = Result.unwrap(await branchData(sd, "dave", "fresh", "pr-9"));
+    expect(existsSync(join(branch, "files"))).toBe(true);
+    expect(existsSync(join(branch, "app.db"))).toBe(false);
   });
 });
 

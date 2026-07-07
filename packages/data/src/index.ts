@@ -172,6 +172,91 @@ export async function snapshot(
   });
 }
 
+// Preview/data-branch directory: appdata/<owner>/<app>@<branch>/. A distinct
+// name (never a valid app) so it can never collide with a real app's live dir.
+function branchDir(
+  sd: StateDir,
+  owner: string,
+  app: string,
+  branch: string,
+): string {
+  return resolve(sd.appdataDir, owner, `${app}@${branch}`);
+}
+
+/**
+ * The data-branch primitive (the Lore-inspired arc, step one): give a preview
+ * its OWN data as a copy-on-write clone of prod, quiesced first so it's
+ * crash-consistent. Idempotent — an existing branch dir is reused (a preview's
+ * data persists across its redeploys, exactly like prod). Prod with no data yet
+ * yields an empty branch dir.
+ */
+export async function branchData(
+  sd: StateDir,
+  owner: string,
+  app: string,
+  branch: string,
+): Promise<Result<string, DataError>> {
+  const op = "branchData";
+  if (!isValidName(owner) || !isValidName(app) || !isValidName(branch))
+    return Result.err(
+      new DataError({
+        message: `invalid branch: ${owner}/${app}@${branch}`,
+        op,
+      }),
+    );
+  const dest = branchDir(sd, owner, app, branch);
+  return Result.tryPromise({
+    try: async () => {
+      if (existsSync(dest)) {
+        await chmod(dest, 0o777);
+        const f = join(dest, "files");
+        if (existsSync(f)) await chmod(f, 0o777);
+        return dest;
+      }
+      const live = liveDir(sd, owner, app);
+      if (!existsSync(live)) {
+        await mkdir(join(dest, "files"), { recursive: true });
+      } else {
+        const dbFile = join(live, "app.db");
+        if (existsSync(dbFile)) checkpoint(dbFile);
+        await cloneDir(live, dest);
+        await rm(join(dest, "app.db-wal"), { force: true });
+        await rm(join(dest, "app.db-shm"), { force: true });
+      }
+      await chmod(dest, 0o777);
+      const files = join(dest, "files");
+      if (existsSync(files)) await chmod(files, 0o777);
+      return dest;
+    },
+    catch: (cause) => new DataError({ message: String(cause), op }),
+  });
+}
+
+export async function deleteBranchData(
+  sd: StateDir,
+  owner: string,
+  app: string,
+  branch: string,
+): Promise<Result<void, DataError>> {
+  const op = "deleteBranchData";
+  if (!isValidName(owner) || !isValidName(app) || !isValidName(branch))
+    return Result.err(
+      new DataError({
+        message: `invalid branch: ${owner}/${app}@${branch}`,
+        op,
+      }),
+    );
+  return Result.tryPromise({
+    try: async () => {
+      await rm(branchDir(sd, owner, app, branch), {
+        recursive: true,
+        force: true,
+      });
+    },
+    catch: (cause) => new DataError({ message: String(cause), op }),
+  });
+}
+
 export async function listSnapshots(
   sd: StateDir,
   owner: string,

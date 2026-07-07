@@ -272,6 +272,10 @@ export class Store {
     this.db.run("DELETE FROM hosts WHERE owner = ? AND app = ?", [owner, app]);
   }
 
+  deleteHost(host: string): void {
+    this.db.run("DELETE FROM hosts WHERE host = ?", [host]);
+  }
+
   // ── app status (runtime observation, written by the reconciler) ───────
   upsertAppStatus(s: Omit<AppStatusRow, "updated_at">): void {
     this.db.run(
