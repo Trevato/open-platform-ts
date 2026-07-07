@@ -211,7 +211,14 @@ ${
 
 <div class="mt cols">
   <section>
-    <div class="row between mb"><span class="label">Pull requests</span></div>
+    <div class="row between mb"><span class="label">Issues</span></div>
+    <form class="newapp" onsubmit="return newIssue(event)" style="margin-bottom:12px">
+      <input type="text" id="issuetitle" placeholder="Describe a feature — label it for the crew" required style="flex:1">
+      <label class="mut" style="font-size:12px;display:flex;align-items:center;gap:5px;white-space:nowrap"><input type="checkbox" id="agentwork" checked> agent-work</label>
+      <button type="submit">File</button>
+    </form>
+    <div id="issues"><div class="mut" style="font-size:13px">loading…</div></div>
+    <div class="row between mb mt"><span class="label">Pull requests</span></div>
     <div id="prs"><div class="mut" style="font-size:13px">loading…</div></div>
     <div class="row between mb mt"><span class="label">Deploy timeline</span></div>
     <div class="tl" id="tl"><div class="mut" style="font-size:13px">loading…</div></div>
@@ -247,6 +254,17 @@ async function tick(){
           '<span class="evt">'+ago(e.ts)+'</span></div>';
       }).join('');}
     }
+    var il=await fetch('/api/v1/repos/'+KEY+'/issues?state=open');
+    if(il.ok){var ij=await il.json();var iel=document.getElementById('issues');
+      if(!ij.issues.length){iel.innerHTML='<div class="mut" style="font-size:13px">No open issues.</div>';}
+      else{iel.innerHTML=ij.issues.map(function(it){
+        var labs=(it.labels||'').split(',').filter(Boolean).map(function(l){return '<span class="chip'+(l.indexOf('agent')===0?' agent':'')+'">'+l.replace(/[<>&]/g,'')+'</span>';}).join('');
+        return '<a class="ev" style="text-decoration:none" href="/apps/'+KEY+'/issues/'+it.number+'">'+
+          '<span class="ph">#'+it.number+'</span>'+
+          '<span class="evm mono">'+String(it.title).replace(/[<>&]/g,'')+'</span>'+
+          '<span class="evt">'+labs+'</span></a>';
+      }).join('');}
+    }
     var pl=await fetch('/api/v1/repos/'+KEY+'/pulls?state=open');
     if(pl.ok){var pj=await pl.json();var pel=document.getElementById('prs');
       if(!pj.pulls.length){pel.innerHTML='<div class="mut" style="font-size:13px">No open pull requests.</div>';}
@@ -267,6 +285,16 @@ async function snap(){
   var r=await fetch('/api/v1/apps/'+KEY+'/snapshots',{method:'POST'});
   var j=await r.json().catch(function(){return{}});
   toast(r.ok?('snapshot '+j.id):(j.error||'snapshot failed'));
+}
+async function newIssue(e){
+  e.preventDefault();
+  var title=document.getElementById('issuetitle').value.trim();
+  var labels=document.getElementById('agentwork').checked?['agent-work']:[];
+  var r=await fetch('/api/v1/repos/'+KEY+'/issues',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:title,labels:labels})});
+  var j=await r.json().catch(function(){return{}});
+  if(r.ok){document.getElementById('issuetitle').value='';toast(labels.length?'filed — crew is on it':'issue filed');tick();}
+  else toast(j.error||'failed');
+  return false;
 }
 tick();setInterval(tick,1500);`,
       );
@@ -328,6 +356,77 @@ async function act(a){
   if(r.ok){toast(a==='merge'?'merged':'closed');setTimeout(function(){location.href='/apps/${esc(owner)}/${esc(app)}'},700);}
   else toast(j.error||'failed');
 }`,
+      );
+    }
+
+    // ── issue detail ─────────────────────────────────────────────────────
+    const im = path.match(/^\/apps\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
+    if (im) {
+      const [, owner, app, num] = im as unknown as [
+        string,
+        string,
+        string,
+        string,
+      ];
+      const issue = deps.store.getIssue(owner, app, Number(num));
+      if (!issue)
+        return page(
+          "Not found",
+          chrome("apps"),
+          `<h1>Not found</h1><p class="sub"><a href="/apps/${esc(owner)}/${esc(app)}">← back</a></p>`,
+          "",
+        );
+      const canWrite = deps.forge.authorize(user, owner, app, "write");
+      const labels = issue.labels.split(",").filter(Boolean);
+      const isAgentWork =
+        labels.includes("agent-work") || labels.includes("agent-building");
+      const body = `
+<div class="row between"><h1 style="margin:0">#${issue.number} <span style="font-weight:560">${esc(issue.title)}</span></h1>
+<a class="mut" href="/apps/${esc(owner)}/${esc(app)}">← ${esc(app)}</a></div>
+<p class="sub"><span class="state">${esc(issue.state)}</span> · by ${esc(issue.author)} · ${labels.map((l) => `<span class="chip${l.startsWith("agent") ? " agent" : ""}">${esc(l)}</span>`).join(" ")}</p>
+${issue.body ? `<div class="card pad" style="white-space:pre-wrap">${esc(issue.body)}</div>` : ""}
+
+${
+  canWrite
+    ? `<div class="row mb mt">
+${isAgentWork ? "" : `<button onclick="assign()">🤖 Assign to build crew</button>`}
+<button class="ghost" onclick="closeIssue()">Close issue</button></div>`
+    : ""
+}
+
+<div class="mt"><div class="row between mb"><span class="label">Activity</span><span class="mut" style="font-size:12px" id="cmts"></span></div>
+<div id="comments"></div></div>
+<form class="newapp mt" onsubmit="return addComment(event)">
+  <input type="text" id="cbody" placeholder="Comment…" required style="flex:1"><button type="submit">Comment</button>
+</form>`;
+      return page(
+        `#${issue.number}`,
+        chrome("apps"),
+        body,
+        `
+var R=${JSON.stringify(`${owner}/${app}`)};var N=${issue.number};
+function ago(ts){var s=Math.max(0,Math.round((Date.now()-ts)/1000));if(s<60)return s+'s ago';var m=Math.round(s/60);if(m<60)return m+'m ago';return Math.round(m/60)+'h ago';}
+async function refresh(){
+  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N); if(!r.ok) return;
+  var d=await r.json(); var el=document.getElementById('comments');
+  el.innerHTML=(d.comments||[]).map(function(c){
+    return '<div class="ev" style="align-items:flex-start"><span class="ph">'+(c.author==='crew'?'🤖':'@'+c.author)+'</span>'+
+      '<span class="evm mono" style="white-space:pre-wrap;overflow:visible">'+String(c.body).replace(/[<>&]/g,'')+'</span>'+
+      '<span class="evt">'+ago(c.ts||c.created_at)+'</span></div>';
+  }).join('')||'<div class="mut" style="font-size:13px">No activity yet.</div>';
+}
+async function assign(){
+  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/labels',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({labels:['agent-work']})});
+  if(r.ok){toast('assigned — the crew is on it');setTimeout(function(){location.reload()},700);}else toast('failed');
+}
+async function closeIssue(){
+  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/close',{method:'POST'});
+  if(r.ok){toast('closed');setTimeout(function(){location.href='/apps/'+R},600);}else toast('failed');
+}
+async function addComment(e){e.preventDefault();var b=document.getElementById('cbody').value.trim();
+  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/comments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({body:b})});
+  if(r.ok){document.getElementById('cbody').value='';refresh();}else toast('failed');return false;}
+refresh();setInterval(refresh,2500);`,
       );
     }
 

@@ -115,6 +115,9 @@ pre.logs {
 .ev .ph { font-size: 13px; font-weight: 560; text-transform: capitalize; }
 .ev .evm { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ev .evt { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.chip { display: inline-block; font-size: 10.5px; padding: 1px 7px; border-radius: 20px; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--muted); font-family: var(--mono); }
+.chip.agent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 
 .tree { font-family: var(--mono); font-size: 13px; line-height: 1.9; }
 .tree .gen { color: var(--muted); }
