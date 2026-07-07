@@ -10,7 +10,9 @@
 # checkout and its inference token. See @op/engine runTask for the run flags.
 FROM node:22-alpine
 
-RUN apk add --no-cache git ripgrep ca-certificates libgcc libstdc++
+# bash: Claude Code's Bash tool needs a real bash — busybox sh is rejected as
+# "No suitable shell found", which leaves the agent unable to run commands.
+RUN apk add --no-cache bash git ripgrep ca-certificates libgcc libstdc++
 
 # bun (pinned) + CURRENT claude from npm; drop the npm cache to stay slimmer.
 RUN npm install -g bun@1.3.13 @anthropic-ai/claude-code && npm cache clean --force
