@@ -248,6 +248,62 @@ describe("engine (docker)", () => {
     const res = await engine.stopAndRemove("no-such-container");
     expect(res.status).toBe("error");
   });
+
+  dtest("imageExists + ensureNetwork are idempotent", async () => {
+    expect(Result.unwrap(await engine.imageExists("busybox:latest"))).toBe(
+      true,
+    );
+    expect(Result.unwrap(await engine.imageExists("op/nope:404"))).toBe(false);
+    const net = `optest-net-${randomHex(4)}`;
+    Result.unwrap(await engine.ensureNetwork(net));
+    Result.unwrap(await engine.ensureNetwork(net)); // second call is a no-op
+    await raw(`/v1.44/networks/${net}`, { method: "DELETE" }).then((r) =>
+      r.text(),
+    );
+  });
+
+  dtest(
+    "runTask: caged one-shot container — captures logs + exit, hardened, writable bind",
+    async () => {
+      // Bind mounts must live under $HOME — colima only shares $HOME into the
+      // Linux VM, so a /var/folders tmpdir bind-mounts as an empty dir.
+      const { mkdirSync } = await import("node:fs");
+      mkdirSync(join(home, ".op-e2e"), { recursive: true });
+      const work = mkdtempSync(join(home, ".op-e2e", "op-task-"));
+      const lines: string[] = [];
+      // The 'agent' writes a file into the bind mount and prints a marker.
+      const res = Result.unwrap(
+        await engine.runTask({
+          image: "busybox:latest",
+          cmd: ["sh", "-c", "echo TASK_MARKER; echo built > /work/OUT; id -u"],
+          binds: [`${work}:/work`],
+          env: { HELLO: "world" },
+          workdir: "/work",
+          labels: { "op.task": "test" },
+          onLine: (l) => lines.push(l),
+          hardTimeoutMs: 30_000,
+        }),
+      );
+      expect(res.exitCode).toBe(0);
+      expect(lines.join("\n")).toContain("TASK_MARKER");
+      // the container's write landed on the host bind mount (the handoff)
+      expect((await Bun.file(join(work, "OUT")).text()).trim()).toBe("built");
+      await rm(work, { recursive: true, force: true });
+    },
+    60_000,
+  );
+
+  dtest("runTask surfaces a nonzero exit code", async () => {
+    const res = Result.unwrap(
+      await engine.runTask({
+        image: "busybox:latest",
+        cmd: ["sh", "-c", "exit 3"],
+        binds: [],
+        env: {},
+      }),
+    );
+    expect(res.exitCode).toBe(3);
+  });
 });
 
 test.skipIf(dockerUp)("docker integration skipped: no daemon reachable", () => {

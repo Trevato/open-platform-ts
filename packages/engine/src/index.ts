@@ -367,6 +367,166 @@ export class Engine {
     );
   }
 
+  /** True if an image tag/ID exists in the local store. */
+  async imageExists(tag: string): Promise<Result<boolean, EngineError>> {
+    const res = await this.request(
+      "imageExists",
+      `${API}/images/${encodeURIComponent(tag)}/json`,
+    );
+    if (res.isErr()) return Result.err(res.error);
+    if (res.value.status === 404) return Result.ok(false);
+    if (!res.value.ok) return this.httpError("imageExists", res.value);
+    await res.value.text();
+    return Result.ok(true);
+  }
+
+  /** Create a bridge network if absent. `internal: true` blocks all egress
+   *  from the network (used to force agent traffic through a proxy). */
+  async ensureNetwork(
+    name: string,
+    opts?: { internal?: boolean },
+  ): Promise<Result<void, EngineError>> {
+    const op = "ensureNetwork";
+    const existing = await this.request(
+      op,
+      `${API}/networks/${encodeURIComponent(name)}`,
+    );
+    if (existing.isErr()) return Result.err(existing.error);
+    if (existing.value.ok) {
+      await existing.value.text();
+      return Result.ok(undefined);
+    }
+    await existing.value.text();
+    const created = await this.request(op, `${API}/networks/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        Name: name,
+        Driver: "bridge",
+        Internal: opts?.internal ?? false,
+      }),
+    });
+    if (created.isErr()) return Result.err(created.error);
+    if (!created.value.ok) return this.httpError(op, created.value);
+    await created.value.text();
+    return Result.ok(undefined);
+  }
+
+  /**
+   * Run a container to completion — the caged-agent primitive. The agent runs
+   * WILD inside (arbitrary bash), but the box is the boundary: non-root,
+   * cap-drop ALL, no-new-privileges, read-only rootfs (only the bind mount and
+   * a tmpfs /tmp are writable), memory/pids/cpu limits, no docker socket, and a
+   * dedicated network isolated from the platform's app networks. Streams logs
+   * to onLine; returns the exit code. Always removes the container.
+   */
+  async runTask(spec: {
+    image: string;
+    cmd: string[];
+    binds: string[]; // e.g. ["/host/work:/work"]
+    env: Record<string, string>;
+    workdir?: string;
+    user?: string;
+    network?: string;
+    memoryBytes?: number;
+    nanoCpus?: number;
+    pidsLimit?: number;
+    tmpfs?: Record<string, string>; // {"/tmp":"rw,size=512m"}
+    labels?: Record<string, string>;
+    onLine?: (line: string) => void;
+    hardTimeoutMs?: number;
+  }): Promise<Result<{ exitCode: number }, EngineError>> {
+    const op = "runTask";
+    const hostConfig: Record<string, unknown> = {
+      Binds: spec.binds,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges"],
+      ReadonlyRootfs: true,
+      Tmpfs: spec.tmpfs ?? { "/tmp": "rw,size=512m" },
+      Memory: spec.memoryBytes ?? 2 * 1024 * 1024 * 1024,
+      NanoCpus: spec.nanoCpus ?? 2_000_000_000,
+      PidsLimit: spec.pidsLimit ?? 512,
+      NetworkMode: spec.network ?? "bridge",
+      RestartPolicy: { Name: "no" },
+    };
+
+    const created = await this.request(op, `${API}/containers/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        Image: spec.image,
+        Cmd: spec.cmd,
+        Env: Object.entries(spec.env).map(([k, v]) => `${k}=${v}`),
+        ...(spec.workdir ? { WorkingDir: spec.workdir } : {}),
+        ...(spec.user ? { User: spec.user } : {}),
+        Labels: spec.labels ?? {},
+        HostConfig: hostConfig,
+      }),
+    });
+    if (created.isErr()) return Result.err(created.error);
+    if (!created.value.ok) return this.httpError(op, created.value);
+    const { Id: id } = (await created.value.json()) as { Id: string };
+
+    try {
+      const started = await this.request(op, `${API}/containers/${id}/start`, {
+        method: "POST",
+      });
+      if (started.isErr()) return Result.err(started.error);
+      if (!started.value.ok) return this.httpError(op, started.value);
+      await started.value.text();
+
+      // Stream logs while it runs; a follow read returns when the container exits.
+      const deadline = spec.hardTimeoutMs
+        ? Date.now() + spec.hardTimeoutMs
+        : Infinity;
+      if (spec.onLine)
+        await this.streamLogs(id, spec.onLine, deadline).catch(() => {});
+
+      const waited = await this.request(op, `${API}/containers/${id}/wait`, {
+        method: "POST",
+      });
+      if (waited.isErr()) return Result.err(waited.error);
+      const { StatusCode } = (await waited.value.json()) as {
+        StatusCode: number;
+      };
+      return Result.ok({ exitCode: StatusCode });
+    } finally {
+      await this.request(op, `${API}/containers/${id}?force=true`, {
+        method: "DELETE",
+      })
+        .then((r) => (r.isOk() ? r.value.text() : undefined))
+        .catch(() => {});
+    }
+  }
+
+  private async streamLogs(
+    id: string,
+    onLine: (line: string) => void,
+    deadline: number,
+  ): Promise<void> {
+    const res = await this.request(
+      "streamLogs",
+      `${API}/containers/${id}/logs?stdout=true&stderr=true&follow=true`,
+    );
+    if (res.isErr() || !res.value.ok || !res.value.body) return;
+    const decoder = new TextDecoder();
+    let buf = "";
+    for await (const chunk of res.value.body as ReadableStream<Uint8Array>) {
+      // Follow logs are multiplexed; demux each chunk then split lines.
+      buf += demuxLogStream(
+        chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk),
+      );
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line) onLine(line);
+      }
+      if (Date.now() > deadline) break;
+    }
+    void decoder;
+  }
+
   async logs(
     containerId: string,
     opts?: { tail?: number },
