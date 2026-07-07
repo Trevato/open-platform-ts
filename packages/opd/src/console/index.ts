@@ -262,11 +262,21 @@ setInterval(refresh,2500);`,
 <div class="tabs" role="tablist">
   <button class="tab on" data-pane="issues" role="tab">Issues <span class="mut" id="ic"></span></button>
   <button class="tab" data-pane="prs" role="tab">Pull requests <span class="mut" id="pc"></span></button>
-  <button class="tab" data-pane="overview" role="tab">Deploys</button>
+  <button class="tab" data-pane="deploys" role="tab">Deploys</button>
   <button class="tab" data-pane="logs" role="tab">Logs</button>
 </div>
 
-<div class="tabpane on mt" id="pane-issues">
+<div class="row between mt filterbar" id="filterbar">
+  <input type="text" id="fq" class="grow" placeholder="Search issues…">
+  <div class="tabs sm" id="fstate">
+    <button class="tab on" data-v="open" type="button">Open</button>
+    <button class="tab" data-v="closed" type="button">Closed</button>
+    <button class="tab" data-v="all" type="button">All</button>
+  </div>
+  <select id="fsort" aria-label="Sort"><option value="new">Newest</option><option value="old">Oldest</option></select>
+</div>
+
+<div class="tabpane on mt-s" id="pane-issues">
   ${
     canWrite
       ? `<form class="newapp" id="composer-form" onsubmit="return compose(event)">
@@ -279,25 +289,24 @@ setInterval(refresh,2500);`,
   <div class="rows" id="issues"><div class="mut">loading…</div></div>
 </div>
 
-<div class="tabpane mt" id="pane-prs">
+<div class="tabpane mt-s" id="pane-prs">
   <div class="rows" id="prs"><div class="mut">loading…</div></div>
 </div>
 
-<div class="tabpane mt" id="pane-overview">
+<div class="tabpane mt" id="pane-deploys">
   ${
     canWrite
       ? `<div class="row mb"><button class="btn secondary sm" onclick="snap(this)">Snapshot data</button>
   <span class="mut" style="font-size:12px">checkpoint → copy-on-write clone → integrity_check</span></div>`
       : ""
   }
-  <div class="label mb">Deploy timeline</div>
-  <div class="tl" id="tl"><div class="mut">loading…</div></div>
+  <div id="deploys"><div class="mut">loading…</div></div>
 </div>
 
 <div class="tabpane mt" id="pane-logs">
   <div class="label mb">Build log</div>
   <pre class="logs" id="build">—</pre>
-  <div class="row between mb mt"><span class="label">Runtime</span><span class="mut" style="font-size:12px" id="logts"></span></div>
+  <div class="row between mb mt"><span class="label"><span class="dot running" id="loglive" style="width:6px;height:6px"></span> Runtime</span><span class="mut" style="font-size:12px" id="logts"></span></div>
   <pre class="logs" id="logs">loading…</pre>
 </div>`;
 
@@ -307,41 +316,96 @@ setInterval(refresh,2500);`,
         body,
         `
 var KEY=${JSON.stringify(`${owner}/${app}`)};
-document.querySelectorAll('.tab').forEach(function(t){t.onclick=function(){
-  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('on',x===t)});
-  document.querySelectorAll('.tabpane').forEach(function(p){p.classList.toggle('on',p.id==='pane-'+t.dataset.pane)});
-}});
-function dotFor(p){if(p==='running')return 'running';if(p==='failed')return 'error';if(p==='stopped')return '';if(p==='built')return 'running';return 'building';}
+// Every bit of view state (tab, filter, search, sort) lives in the URL, so a
+// filtered view is a shareable link and back/forward just works.
+var U=urlState({tab:enP(['issues','prs','deploys','logs'],'issues'),state:enP(['open','closed','all'],'open'),q:strP(''),sort:enP(['new','old'],'new')});
+var lastIssues=[],lastPrs=[];
+
+function activateTab(tab){
+  document.querySelectorAll('.tab[data-pane]').forEach(function(x){x.classList.toggle('on',x.dataset.pane===tab)});
+  document.querySelectorAll('.tabpane').forEach(function(p){p.classList.toggle('on',p.id==='pane-'+tab)});
+  var isList=tab==='issues'||tab==='prs';
+  document.getElementById('filterbar').classList.toggle('hide',!isList);
+  document.getElementById('fq').placeholder='Search '+(tab==='prs'?'pull requests':'issues')+'…';
+}
+function syncControls(){var s=U.read();document.getElementById('fq').value=s.q;
+  document.querySelectorAll('#fstate .tab').forEach(function(b){b.classList.toggle('on',b.dataset.v===s.state)});
+  document.getElementById('fsort').value=s.sort;}
+function filt(list,text){var s=U.read();var q=s.q.toLowerCase();
+  var out=list.filter(function(x){return !q||text(x).toLowerCase().indexOf(q)>=0;});
+  out.sort(function(a,b){return s.sort==='old'?a.number-b.number:b.number-a.number;});return out;}
 function issueRow(it){
   var labs=(it.labels||'').split(',').filter(Boolean).map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join('');
-  return '<a class="list-row" href="/apps/'+KEY+'/issues/'+it.number+'"><span class="num">#'+it.number+'</span><span class="ttl">'+escHtml(it.title)+'</span><span class="meta">'+labs+'</span></a>';
+  var st=it.state==='closed'?'<span class="pill closed">closed</span>':'';
+  return '<a class="list-row" href="/apps/'+KEY+'/issues/'+it.number+'"><span class="num">#'+it.number+'</span><span class="ttl">'+escHtml(it.title)+'</span><span class="meta">'+labs+st+'</span></a>';
 }
-function prRow(pr){
-  var s=pr.state||'open';
+function prRow(pr){var s=pr.state||'open';
   return '<a class="list-row" href="/apps/'+KEY+'/pulls/'+pr.number+'"><span class="num">#'+pr.number+'</span><span class="ttl">'+escHtml(pr.title)+'</span><span class="meta"><span class="pill '+s+'">'+s+'</span></span></a>';
 }
+function renderLists(){
+  var iss=filt(lastIssues,function(x){return x.title+' '+(x.labels||'')});
+  document.getElementById('ic').textContent=iss.length||'';
+  document.getElementById('issues').innerHTML=iss.length?iss.map(issueRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">'+(lastIssues.length?'No issues match your filter.':'No issues. Describe a feature above.')+'</div>';
+  var prs=filt(lastPrs,function(x){return x.title});
+  document.getElementById('pc').textContent=prs.length||'';
+  document.getElementById('prs').innerHTML=prs.length?prs.map(prRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">'+(lastPrs.length?'No pull requests match.':'No pull requests.')+'</div>';
+}
+// A deploy = one sha's phase sequence. Grouping answers "did this finish?" —
+// each deploy shows the phase it actually reached (queued→…→running/failed).
+function phaseBare(p){return p.replace(/\\s*\\(pr-\\d+\\)\\s*/,'');}
+function renderDeploys(events){
+  var groups=[],by={};
+  events.forEach(function(e){var prev=(e.phase.match(/\\(pr-\\d+\\)/)||[])[0];var key=(e.sha||'?')+(prev||'');
+    if(!by[key]){by[key]={sha:e.sha||'?',preview:(e.phase.match(/pr-\\d+/)||[])[0]||null,latest:e,evs:[]};groups.push(by[key]);}
+    by[key].evs.push(e);});
+  if(!groups.length)return '<div class="mut" style="font-size:13px">No deploys yet.</div>';
+  return groups.map(function(g,i){
+    var cur=phaseBare(g.latest.phase);
+    var done=cur==='running'||cur==='preview-ready';var bad=cur.indexOf('fail')>=0;
+    var dc=done?'running':(bad?'error':'building');
+    var pc=done?'ok':(bad?'fail':'building');
+    var tag=g.preview?'<span class="pill building">'+g.preview+'</span>':'<span class="pill">prod</span>';
+    var trail=g.evs.slice().reverse().map(function(e){return phaseBare(e.phase);}).join(' › ');
+    return '<div class="card pad mb" style="padding:11px 14px"><div class="row between">'+
+      '<span class="row" style="gap:8px"><span class="dot '+dc+'"></span><span class="mono" style="font-size:12px">'+escHtml(g.sha.slice(0,10))+'</span>'+tag+'<span class="pill '+pc+'">'+cur+'</span></span>'+
+      '<span class="mut" style="font-size:12px">'+relTime(g.latest.ts)+'</span></div>'+
+      (i===0?'<div class="mono mt-s" style="font-size:11px;color:var(--faint)">'+escHtml(trail)+'</div>':'')+'</div>';
+  }).join('');
+}
+function stateParam(){var s=U.read().state;return s==='all'?'':'?state='+s;}
 async function tick(){
   if(document.hidden) return;
   try{
     var r=await fetch('/api/v1/apps/'+KEY);
     if(r.ok){var a=await r.json();document.getElementById('dot').className='dot '+a.state;document.getElementById('state').textContent=a.state;
       var dg=document.getElementById('digest');if(dg&&a.imageDigest)dg.textContent=a.imageDigest.slice(0,26)+'…';}
-    var il=await fetch('/api/v1/repos/'+KEY+'/issues?state=open');
-    if(il.ok){var ij=await il.json();var iel=document.getElementById('issues');document.getElementById('ic').textContent=ij.issues.length||'';
-      iel.innerHTML=ij.issues.length?ij.issues.map(issueRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">No open issues. Describe a feature above.</div>';}
-    var pl=await fetch('/api/v1/repos/'+KEY+'/pulls?state=open');
-    if(pl.ok){var pj=await pl.json();var pel=document.getElementById('prs');document.getElementById('pc').textContent=pj.pulls.length||'';
-      pel.innerHTML=pj.pulls.length?pj.pulls.map(prRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">No open pull requests.</div>';}
+    var il=await fetch('/api/v1/repos/'+KEY+'/issues'+stateParam());
+    if(il.ok){lastIssues=(await il.json()).issues||[];}
+    var pl=await fetch('/api/v1/repos/'+KEY+'/pulls'+stateParam());
+    if(pl.ok){lastPrs=(await pl.json()).pulls||[];}
+    renderLists();
     var ev=await fetch('/api/v1/apps/'+KEY+'/events');
-    if(ev.ok){var j=await ev.json();var el=document.getElementById('tl');
-      el.innerHTML=j.events.length?j.events.map(function(e){
-        return '<div class="tl-ev"><span class="dot '+dotFor(e.phase)+'"></span><span class="ph">'+escHtml(e.phase)+'</span><span class="msg" title="'+escHtml(e.message||'')+'">'+escHtml(e.message||'')+'</span><span class="t">'+relTime(e.ts)+'</span></div>';
-      }).join(''):'<div class="mut" style="font-size:13px">No deploys yet.</div>';}
+    if(ev.ok){document.getElementById('deploys').innerHTML=renderDeploys((await ev.json()).events||[]);}
     var bl=await fetch('/api/v1/apps/'+KEY+'/buildlog');
     if(bl.ok){document.getElementById('build').textContent=(await bl.text())||'—';}
     var lg=await fetch('/api/v1/apps/'+KEY+'/logs');
-    if(lg.ok){var t=await lg.text();var lel=document.getElementById('logs');var atBottom=lel.scrollTop+lel.clientHeight>=lel.scrollHeight-8;lel.textContent=t||'(no output yet)';if(atBottom)lel.scrollTop=lel.scrollHeight;document.getElementById('logts').textContent=new Date().toLocaleTimeString();}
-  }catch(_){}
+    if(lg.ok){var t=await lg.text();var lel=document.getElementById('logs');var atBottom=lel.scrollTop+lel.clientHeight>=lel.scrollHeight-8;
+      lel.textContent=t||'(no output yet — the app has not logged anything since it started)';if(atBottom)lel.scrollTop=lel.scrollHeight;
+      document.getElementById('logts').textContent='updated '+new Date().toLocaleTimeString();}
+  }catch(_){document.getElementById('logts').textContent='reconnecting…';}
+}
+// wire up tabs (pushState — discrete nav) + filters (replaceState, throttled)
+document.querySelectorAll('.tab[data-pane]').forEach(function(t){t.onclick=function(){U.set({tab:t.dataset.pane},{push:true});activateTab(t.dataset.pane);};});
+document.getElementById('fq').oninput=function(){U.set({q:this.value},{throttle:true});renderLists();};
+document.querySelectorAll('#fstate .tab').forEach(function(b){b.onclick=function(){U.set({state:b.dataset.v});syncControls();tick();};});
+document.getElementById('fsort').onchange=function(){U.set({sort:this.value});renderLists();};
+U.onpop(function(){var s=U.read();activateTab(s.tab);syncControls();tick();});
+activateTab(U.read().tab);syncControls();
+async function snap(b){b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/apps/'+KEY+'/snapshots',{method:'POST'});
+  var j=await r.json().catch(function(){return{}});
+  b.classList.remove('is-loading');b.disabled=false;
+  toast(r.ok?('snapshot '+j.id):(j.error||'snapshot failed'));
 }
 async function snap(b){b.classList.add('is-loading');b.disabled=true;
   var r=await fetch('/api/v1/apps/'+KEY+'/snapshots',{method:'POST'});

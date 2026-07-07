@@ -45,6 +45,22 @@ function toast(m){var t=document.getElementById('toast');if(!t)return;t.textCont
 function copy(t){navigator.clipboard.writeText(t).then(function(){toast('copied')});}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function relTime(ts){var s=Math.max(0,Math.round((Date.now()-ts)/1000));if(s<60)return s+'s ago';var m=Math.round(s/60);if(m<60)return m+'m ago';var h=Math.round(m/60);if(h<24)return h+'h ago';return Math.round(h/24)+'d ago';}
+// URL-as-state (the nuqs pattern, dep-free): view state lives in the query
+// string so it's shareable, refresh-safe, and back/forward works. Defaults are
+// omitted from the URL (clean links); throttled writes keep typing responsive.
+function urlState(defs){
+  function read(){var sp=new URLSearchParams(location.search),o={};for(var k in defs){o[k]=sp.has(k)?defs[k].parse(sp.get(k)):defs[k].def;}return o;}
+  var timer;
+  function write(state,push){var sp=new URLSearchParams(location.search);for(var k in defs){var v=state[k],d=defs[k];
+    if(v==null||v===d.def)sp.delete(k);else sp.set(k,d.serialize(v));}
+    var qs=sp.toString();history[push?'pushState':'replaceState'](state,'',location.pathname+(qs?'?'+qs:'')+location.hash);}
+  return {read:read,
+    set:function(patch,opts){opts=opts||{};var s=Object.assign(read(),patch);
+      if(opts.throttle){clearTimeout(timer);timer=setTimeout(function(){write(s,false)},250);}else write(s,!!opts.push);return s;},
+    onpop:function(cb){window.addEventListener('popstate',function(){cb(read())});}};
+}
+function enP(vals,def){return {parse:function(v){return vals.indexOf(v)>=0?v:def;},serialize:function(v){return v;},def:def};}
+function strP(def){return {parse:function(v){return v;},serialize:function(v){return v;},def:def||''};}
 function setTheme(t){document.documentElement.dataset.theme=t;try{localStorage.setItem('op-theme',t)}catch(e){}
   var c=document.getElementById('tmc');if(c){[].forEach.call(c.children,function(b){b.classList.toggle('on',b.dataset.t===t)})}}
 // crew status pill — one cheap poll, paused on hidden tabs

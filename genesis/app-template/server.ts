@@ -77,6 +77,8 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
+    // Log every request so the platform's runtime-logs view shows live traffic.
+    console.log(`${new Date().toISOString()} ${req.method} ${path}`);
 
     if (oidcEnabled && path === "/login") {
       const verifier = rand(32);

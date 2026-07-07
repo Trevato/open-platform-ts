@@ -198,6 +198,13 @@ label.check { font-size: var(--fs-sm); color: var(--muted); display: inline-flex
 .tab:hover { color: var(--ink); background: transparent; }
 .tab.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
 .tabpane { display: none; } .tabpane.on { display: block; }
+.tabs.sm { padding: 2px; }
+.tabs.sm .tab { height: 26px; padding: 0 10px; font-size: var(--fs-xs); }
+select { background: var(--panel-2); border: var(--bw) solid var(--line); color: var(--ink); border-radius: var(--r-md);
+  padding: 0 10px; height: 34px; font-size: var(--fs-sm); font-family: var(--sans); cursor: pointer; outline: none; }
+select:focus-visible { border-color: var(--accent); box-shadow: var(--ring); }
+.filterbar { gap: 8px; flex-wrap: nowrap; }
+@media (max-width: 600px) { .filterbar { flex-wrap: wrap; } .filterbar #fq { order: -1; width: 100%; } }
 
 /* ── list rows (issues, PRs) ─────────────────────────────────────────────── */
 .rows { display: flex; flex-direction: column; }
