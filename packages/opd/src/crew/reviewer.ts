@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { Result, TaggedError, type Log } from "@op/core";
 import { loadAgent, type RunAgent } from "@op/crew";
+import { makeHeartbeat } from "./heartbeat.ts";
 
 export class ReviewError extends TaggedError("ReviewError")<{
   message: string;
@@ -194,35 +195,4 @@ export async function runReviewer(
     },
     catch: fail("runReviewer"),
   });
-}
-
-function makeHeartbeat(emit: (line: string) => void): (line: string) => void {
-  let last = 0;
-  return (line) => {
-    try {
-      const msg = JSON.parse(line) as {
-        type?: string;
-        message?: {
-          content?: Array<{ type?: string; text?: string; name?: string }>;
-        };
-      };
-      if (msg.type !== "assistant" || !msg.message?.content) return;
-      const now = Date.now();
-      if (now - last < 20_000) return;
-      for (const b of msg.message.content) {
-        if (b.type === "text" && b.text) {
-          emit(`… ${b.text.slice(0, 120).replace(/\s+/g, " ")}`);
-          last = now;
-          return;
-        }
-        if (b.type === "tool_use" && b.name) {
-          emit(`… ${b.name}`);
-          last = now;
-          return;
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  };
 }

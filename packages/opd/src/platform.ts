@@ -31,6 +31,7 @@ import { oidcRouter } from "./oidc.ts";
 import { ensureSigningKey } from "./oidc-clients.ts";
 import { Dispatcher } from "./crew/dispatcher.ts";
 import { makeContainerRunner } from "./crew/container-runner.ts";
+import { draftIssue } from "./crew/composer.ts";
 import {
   commitFiles,
   readSecretsFile,
@@ -230,6 +231,10 @@ export class Platform {
         // The dispatcher is created after the router (it needs the reconciler),
         // so route crew-kicks through a holder the router can call immediately.
         const crewKick = { fn: () => {} };
+        // The crew's inference credential — a Claude Code OAuth token (works only
+        // via the `claude` CLI). Drives the caged build/review agents and the
+        // lightweight issue composer; absent → those degrade gracefully.
+        const claudeToken = process.env["CLAUDE_CODE_OAUTH_TOKEN"] ?? null;
         const forgeRoutes = forgeRouter(forge, git);
         const apiRoutes = apiRouter({
           sd,
@@ -239,6 +244,17 @@ export class Platform {
           engine,
           reconciler,
           kickCrew: () => crewKick.fn(),
+          draftIssue: claudeToken
+            ? async (idea, context) => {
+                const d = await draftIssue({
+                  idea,
+                  oauthToken: claudeToken,
+                  log,
+                  ...(context ? { context } : {}),
+                });
+                return d.status === "ok" ? d.value : null;
+              }
+            : null,
           domain: opts.domain,
           log,
         });
@@ -286,8 +302,8 @@ export class Platform {
         // The AI build crew. The Claude Code OAuth token is BYO (sk-ant-oat01,
         // from `claude setup-token`) — the ONLY credential that can drive an
         // agent. Without it the dispatcher still runs but posts a "set a token"
-        // note on agent-work issues instead of building.
-        const claudeToken = process.env["CLAUDE_CODE_OAUTH_TOKEN"] ?? null;
+        // note on agent-work issues instead of building. (claudeToken is read
+        // above, before the API router, so the composer can share it.)
         const adminUser = store.getUser(ADMIN_USER);
         const dispatcher = new Dispatcher({
           sd,

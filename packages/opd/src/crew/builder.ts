@@ -12,6 +12,7 @@ import {
 import { loadAgent, type RunAgent } from "@op/crew";
 import type { Forge } from "@op/forge";
 import type { IssueRow, UserRow } from "@op/store";
+import { makeHeartbeat } from "./heartbeat.ts";
 
 export class BuilderError extends TaggedError("BuilderError")<{
   message: string;
@@ -228,36 +229,4 @@ export async function runBuilder(
     },
     catch: fail("runBuilder"),
   });
-}
-
-// Turn the JSONL stream into occasional human-readable progress lines.
-function makeHeartbeat(emit: (line: string) => void): (line: string) => void {
-  let lastEmit = 0;
-  return (line) => {
-    try {
-      const msg = JSON.parse(line) as {
-        type?: string;
-        message?: {
-          content?: Array<{ type?: string; text?: string; name?: string }>;
-        };
-      };
-      if (msg.type !== "assistant" || !msg.message?.content) return;
-      const now = Date.now();
-      if (now - lastEmit < 20_000) return; // throttle
-      for (const block of msg.message.content) {
-        if (block.type === "text" && block.text) {
-          emit(`… ${block.text.slice(0, 120).replace(/\s+/g, " ")}`);
-          lastEmit = now;
-          return;
-        }
-        if (block.type === "tool_use" && block.name) {
-          emit(`… using ${block.name}`);
-          lastEmit = now;
-          return;
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  };
 }

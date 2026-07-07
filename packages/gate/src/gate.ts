@@ -67,6 +67,9 @@ export class Gate {
     this.httpsServer = Bun.serve({
       port: this.opts.httpsPort,
       tls: { cert: this.opts.tls.cert, key: this.opts.tls.key },
+      // The default 10s drops slow-but-legitimate requests (the issue composer
+      // shells out to a model, ~10s). Give in-process work room to finish.
+      idleTimeout: 60,
       fetch: (req) => this.handleHttps(req),
     });
     this.httpServer = Bun.serve({

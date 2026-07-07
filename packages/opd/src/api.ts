@@ -20,6 +20,19 @@ export interface ApiDeps {
   reconciler: Reconciler;
   /** Wake the crew dispatcher (issue labeled agent-work). */
   kickCrew: () => void;
+  /** Compose a rough idea into a structured issue draft, or null if the
+   *  composer isn't credentialed (the console then files the idea as-is). */
+  draftIssue:
+    | ((
+        idea: string,
+        context?: string,
+      ) => Promise<{
+        title: string;
+        body: string;
+        labels: string[];
+        acceptanceChecks: string[];
+      } | null>)
+    | null;
   domain: string;
   log: Log;
 }
@@ -196,6 +209,30 @@ export function apiRouter(
       return json({ ok: true });
     }
 
+    // POST /api/v1/repos/:o/:r/issues/draft — compose a rough idea into a
+    // structured issue draft (does NOT create it; the console files it via the
+    // issues route). 503 when the composer isn't credentialed → file as-is.
+    const dm = path.match(
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/draft$/,
+    );
+    if (req.method === "POST" && dm) {
+      const [, owner, repo] = dm as unknown as [string, string, string];
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, repo, "write"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      if (!deps.draftIssue) return json({ error: "composer_offline" }, 503);
+      const body = (await req.json().catch(() => null)) as {
+        idea?: string;
+      } | null;
+      if (!body?.idea?.trim()) return json({ error: "idea required" }, 400);
+      const ctx = await deps.git.readFile(owner, repo, "main", "server.ts");
+      const context =
+        ctx.status === "ok" ? new TextDecoder().decode(ctx.value) : undefined;
+      const draft = await deps.draftIssue(body.idea, context);
+      if (!draft) return json({ error: "composer_offline" }, 503);
+      return json(draft);
+    }
+
     // ── issues ───────────────────────────────────────────────────────────
     let im = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues$/);
     if (im) {
@@ -306,6 +343,21 @@ export function apiRouter(
           closed.error.code === "unauthorized" ? 403 : 400,
         );
       return json({ ok: true });
+    }
+
+    // GET /api/v1/crew — a cheap rollup for the header status pill: how many
+    // issues the crew is actively building/reviewing, and how many are blocked
+    // on a human after a failed review.
+    if (req.method === "GET" && path === "/api/v1/crew") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const working =
+        deps.store.listIssuesByLabel("agent-building").length +
+        deps.store.listIssuesByLabel("agent-reviewing").length;
+      const blocked = deps.store.listIssuesByLabel(
+        "agent-review-failed",
+      ).length;
+      return json({ working, blocked });
     }
 
     // GET /api/v1/apps — desired apps (from gitops) overlaid with observed state.
