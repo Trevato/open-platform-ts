@@ -27,6 +27,8 @@ import {
 import { Store } from "@op/store";
 import { apiRouter } from "./api.ts";
 import { consoleRouter } from "./console/index.ts";
+import { oidcRouter } from "./oidc.ts";
+import { ensureSigningKey } from "./oidc-clients.ts";
 import {
   commitFiles,
   readSecretsFile,
@@ -192,12 +194,15 @@ export class Platform {
         const engine = new Engine(opts.engineSocket);
         Result.unwrap(await engine.ping());
 
+        const oidcKey = await ensureSigningKey(sd);
+
         const reconciler = new Reconciler({
           sd,
           store,
           git,
           engine,
           domain: opts.domain,
+          httpsPort: opts.httpsPort,
           platformId,
           log,
         });
@@ -213,6 +218,7 @@ export class Platform {
           domain: opts.domain,
           log,
         });
+        const oidcRoutes = oidcRouter({ forge, store, key: oidcKey, log });
         const consoleRoutes = consoleRouter({
           forge,
           store,
@@ -220,11 +226,13 @@ export class Platform {
           sd,
           domain: opts.domain,
         });
-        // API/git win first (machines); the console is the human face fallback.
+        // API/git win first (machines); OIDC before the console; the console is
+        // the human face fallback.
         const platformHandler = async (req: Request): Promise<Response> => {
           return (
             (await forgeRoutes(req)) ??
             (await apiRoutes(req)) ??
+            (await oidcRoutes(req)) ??
             (await consoleRoutes(req)) ??
             Response.json({ error: "not found" }, { status: 404 })
           );

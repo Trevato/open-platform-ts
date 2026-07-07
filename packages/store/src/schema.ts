@@ -61,4 +61,24 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX deploy_events_app ON deploy_events (owner, app, id);
   `,
+  `
+  CREATE TABLE oauth_clients (
+    client_id       TEXT PRIMARY KEY,
+    secret_hash     TEXT NOT NULL,
+    owner           TEXT NOT NULL,
+    app             TEXT NOT NULL,
+    redirect_uris   TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
+  );
+  CREATE TABLE oauth_codes (
+    code           TEXT PRIMARY KEY,
+    client_id      TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    redirect_uri   TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    scope          TEXT NOT NULL,
+    nonce          TEXT,
+    expires_at     INTEGER NOT NULL
+  );
+  `,
 ];

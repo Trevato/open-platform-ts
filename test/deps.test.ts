@@ -8,7 +8,7 @@ import { join } from "node:path";
 const ALLOWED = new Set([
   "better-result", // errors-as-values (core)
   "age-encryption", // typage — sovereign sealing (secrets)
-  "jose", // token/OIDC crypto (identity, gate/ACME later)
+  "jose", // token/OIDC crypto (identity provider, gate/ACME later)
   "@peculiar/x509", // CA + cert minting (gate)
   // M2/M3, pre-approved by the plan: "ai", "zod", "@modelcontextprotocol/sdk", "playwright"
 ]);

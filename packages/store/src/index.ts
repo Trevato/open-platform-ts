@@ -48,6 +48,26 @@ export interface DeployEventRow {
   sha: string | null;
 }
 
+export interface OauthClientRow {
+  client_id: string;
+  secret_hash: string;
+  owner: string;
+  app: string;
+  redirect_uris: string; // JSON array
+  created_at: number;
+}
+
+export interface OauthCodeRow {
+  code: string;
+  client_id: string;
+  user_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scope: string;
+  nonce: string | null;
+  expires_at: number;
+}
+
 export class Store {
   readonly db: Database;
 
@@ -106,6 +126,14 @@ export class Store {
       this.db
         .query<UserRow, [string]>("SELECT * FROM users WHERE username = ?")
         .get(username) ?? null
+    );
+  }
+
+  getUserById(id: string): UserRow | null {
+    return (
+      this.db
+        .query<UserRow, [string]>("SELECT * FROM users WHERE id = ?")
+        .get(id) ?? null
     );
   }
 
@@ -290,5 +318,60 @@ export class Store {
         [string, string, number]
       >("SELECT * FROM deploy_events WHERE owner = ? AND app = ? ORDER BY id DESC LIMIT ?")
       .all(owner, app, limit);
+  }
+
+  // ── OAuth clients (one per app; upserted at deploy) ───────────────────
+  upsertClient(c: Omit<OauthClientRow, "created_at">): void {
+    this.db.run(
+      `INSERT INTO oauth_clients (client_id, secret_hash, owner, app, redirect_uris, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(client_id) DO UPDATE SET
+         secret_hash = excluded.secret_hash, redirect_uris = excluded.redirect_uris`,
+      [c.client_id, c.secret_hash, c.owner, c.app, c.redirect_uris, Date.now()],
+    );
+  }
+
+  getClient(clientId: string): OauthClientRow | null {
+    return (
+      this.db
+        .query<
+          OauthClientRow,
+          [string]
+        >("SELECT * FROM oauth_clients WHERE client_id = ?")
+        .get(clientId) ?? null
+    );
+  }
+
+  // ── OAuth authorization codes (short-lived, single-use) ───────────────
+  createCode(c: OauthCodeRow): void {
+    this.db.run(
+      `INSERT INTO oauth_codes (code, client_id, user_id, redirect_uri, code_challenge, scope, nonce, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        c.code,
+        c.client_id,
+        c.user_id,
+        c.redirect_uri,
+        c.code_challenge,
+        c.scope,
+        c.nonce,
+        c.expires_at,
+      ],
+    );
+  }
+
+  /** Atomically fetch-and-delete: a code can be redeemed at most once. */
+  consumeCode(code: string): OauthCodeRow | null {
+    return this.db.transaction(() => {
+      const row =
+        this.db
+          .query<
+            OauthCodeRow,
+            [string]
+          >("SELECT * FROM oauth_codes WHERE code = ?")
+          .get(code) ?? null;
+      if (row) this.db.run("DELETE FROM oauth_codes WHERE code = ?", [code]);
+      return row;
+    })();
   }
 }

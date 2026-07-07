@@ -3,17 +3,22 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "bin": { "op": "./src/cli.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "op": "./src/cli.ts"
+  },
   "dependencies": {
     "@op/core": "workspace:*",
-    "@op/store": "workspace:*",
-    "@op/secrets": "workspace:*",
-    "@op/git": "workspace:*",
-    "@op/forge": "workspace:*",
-    "@op/engine": "workspace:*",
     "@op/data": "workspace:*",
+    "@op/engine": "workspace:*",
+    "@op/forge": "workspace:*",
     "@op/gate": "workspace:*",
-    "@op/mitosis": "workspace:*"
+    "@op/git": "workspace:*",
+    "@op/identity": "workspace:*",
+    "@op/mitosis": "workspace:*",
+    "@op/secrets": "workspace:*",
+    "@op/store": "workspace:*"
   }
 }

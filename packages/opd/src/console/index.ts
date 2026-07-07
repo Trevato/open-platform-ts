@@ -4,6 +4,7 @@ import type { GitHost } from "@op/git";
 import { readLineage } from "@op/mitosis";
 import type { Store } from "@op/store";
 import { readAppSpecs } from "../gitops.ts";
+import { authorizeFor } from "../oidc.ts";
 import { hostFor } from "../policy.ts";
 import { esc, html, page, type Chrome } from "./layout.ts";
 import { STYLE } from "./style.ts";
@@ -38,7 +39,12 @@ function origin(req: Request): string {
 export function consoleRouter(
   deps: ConsoleDeps,
 ): (req: Request) => Promise<Response | null> {
-  const loginPage = (error?: string) =>
+  // Only same-origin absolute paths may be resumed after login — never an
+  // attacker-supplied external URL (open-redirect guard).
+  const safeNext = (raw: string | null): string =>
+    raw && raw.startsWith("/") && !raw.startsWith("//") ? raw : "/";
+
+  const loginPage = (next: string, error?: string) =>
     html(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in · ${esc(deps.domain)}</title>
@@ -46,7 +52,7 @@ export function consoleRouter(
 <div class="wrap login"><div class="card">
 <h1><span class="brand"><span class="seed"></span>Open Platform</span></h1>
 ${error ? `<p class="err">${esc(error)}</p>` : ""}
-<form method="post" action="/login">
+<form method="post" action="/login?next=${esc(encodeURIComponent(next))}">
   <input type="text" name="username" placeholder="username" autofocus autocomplete="username" required>
   <input type="password" name="password" placeholder="password" autocomplete="current-password" required>
   <button type="submit">Sign in</button>
@@ -59,15 +65,29 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
     const path = url.pathname;
 
     // ── login / logout ──────────────────────────────────────────────────
-    if (path === "/login" && req.method === "GET") return loginPage();
+    if (path === "/login" && req.method === "GET")
+      return loginPage(safeNext(url.searchParams.get("next")));
     if (path === "/login" && req.method === "POST") {
       const form = await req.formData();
       const username = String(form.get("username") ?? "");
       const password = String(form.get("password") ?? "");
+      // next travels in the action query string (clean single decode), never a
+      // hidden field — a form-body round-trip mangles '+'/space in the URL.
+      const next = safeNext(url.searchParams.get("next"));
       const user = await deps.forge.verifyPassword(username, password);
-      if (!user) return loginPage("Invalid username or password.");
+      if (!user) return loginPage(next, "Invalid username or password.");
       const session = deps.forge.createSession(user.id);
-      return redirect("/", sessionCookie(session.id));
+
+      // If login was an OIDC bounce, complete the authorization HERE — the user
+      // is authenticated in-process, so we never depend on the just-set cookie
+      // being re-read at /oauth/authorize across a redirect (SameSite-safe).
+      if (next.startsWith("/oauth/authorize?")) {
+        const params = new URL(next, "https://x").searchParams;
+        const outcome = authorizeFor(deps.store, params, user.id);
+        if (outcome.kind !== "error")
+          return redirect(outcome.location, sessionCookie(session.id));
+      }
+      return redirect(next, sessionCookie(session.id));
     }
     if (path === "/logout" && req.method === "POST") {
       return redirect(

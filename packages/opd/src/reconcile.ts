@@ -1,13 +1,25 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { buildLogPath, repoPath, type Log, type StateDir } from "@op/core";
+import {
+  buildLogPath,
+  randomHex,
+  repoPath,
+  type Log,
+  type StateDir,
+} from "@op/core";
 import { provisionDataDir } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { GitHost } from "@op/git";
 import type { Store } from "@op/store";
 import { readAppSpecs, SYS } from "./gitops.ts";
+import { provisionAppClient } from "./oidc-clients.ts";
 import { admitImageTag, hostFor, type AppSpec } from "./policy.ts";
+
+// Per-deploy secret the template app signs its own session cookie with.
+function randomAppSecret(): string {
+  return `op_app_${randomHex(24)}`;
+}
 
 // Level-based and idempotent: every pass recomputes desired-vs-actual from
 // git HEAD and engine labels. A crash mid-pass costs nothing — the next pass
@@ -22,10 +34,18 @@ export class Reconciler {
       git: GitHost;
       engine: Engine;
       domain: string;
+      httpsPort: number;
       platformId: string;
       log: Log;
     },
   ) {}
+
+  /** External origin for a host on this platform (honors a non-443 port). */
+  private originFor(host: string): string {
+    return this.deps.httpsPort === 443
+      ? `https://${host}`
+      : `https://${host}:${this.deps.httpsPort}`;
+  }
 
   private stopped = false;
 
@@ -205,6 +225,19 @@ export class Reconciler {
         dataDir = provisioned.value;
       }
 
+      // "Sign in with your platform": register this app as an OIDC client and
+      // hand it the issuer + fresh credentials. The container reaches the
+      // issuer (the platform host) via host-gateway, trusting the mounted CA.
+      const issuer = this.originFor(this.deps.domain);
+      const appOrigin = this.originFor(host);
+      const oidc = await provisionAppClient(
+        store,
+        spec.owner,
+        spec.app,
+        appOrigin,
+      );
+      const caFile = join(this.deps.sd.certsDir, "ca.crt");
+
       const ran = await engine.runApp({
         image: tag,
         owner: spec.owner,
@@ -217,7 +250,16 @@ export class Reconciler {
           OP_APP: spec.app,
           OP_OWNER: spec.owner,
           OP_HOST: host,
+          OIDC_ISSUER: issuer,
+          OIDC_CLIENT_ID: oidc.clientId,
+          OIDC_CLIENT_SECRET: oidc.clientSecret,
+          OIDC_REDIRECT_URI: oidc.redirectUri,
+          OP_CA_FILE: "/etc/op/ca.crt",
+          NODE_EXTRA_CA_CERTS: "/etc/op/ca.crt",
+          APP_SECRET: randomAppSecret(),
         },
+        caFile,
+        extraHosts: [`${this.deps.domain}:host-gateway`],
         ...(dataDir ? { dataDir } : {}),
       });
       if (ran.status === "error") return fail(`run: ${ran.error.message}`);

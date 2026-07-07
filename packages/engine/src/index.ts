@@ -69,6 +69,8 @@ export interface RunAppSpec {
   env: Record<string, string>;
   containerPort: number;
   dataDir?: string; // bind-mounted at /data
+  caFile?: string; // host CA path, bind-mounted read-only at /etc/op/ca.crt
+  extraHosts?: string[]; // Docker ExtraHosts, e.g. "plat.localtest.me:host-gateway"
   memoryBytes?: number;
   nanoCpus?: number;
   user?: string;
@@ -231,7 +233,14 @@ export class Engine {
     };
     // dataDir is bind-mounted; the caller pre-creates it 0777 (see @op/data)
     // so the default 65534:65534 user can write without a chown dance.
-    if (spec.dataDir) hostConfig["Binds"] = [`${spec.dataDir}:/data`];
+    const binds: string[] = [];
+    if (spec.dataDir) binds.push(`${spec.dataDir}:/data`);
+    // Read-only CA so the app can trust the platform's own HTTPS (OIDC token
+    // exchange server-to-server) via NODE_EXTRA_CA_CERTS / OP_CA_FILE.
+    if (spec.caFile) binds.push(`${spec.caFile}:/etc/op/ca.crt:ro`);
+    if (binds.length) hostConfig["Binds"] = binds;
+    // host-gateway lets the container reach the platform issuer on the host.
+    if (spec.extraHosts?.length) hostConfig["ExtraHosts"] = spec.extraHosts;
 
     const created = await this.request(op, `${API}/containers/create`, {
       method: "POST",
