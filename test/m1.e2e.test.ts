@@ -224,8 +224,8 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
         await Platform.up({
           root: join(base, "mother"),
           domain: "plat.localtest.me",
-          httpPort: 18080,
-          httpsPort: 18443,
+          httpPort: 28080,
+          httpsPort: 28443,
           custodyAck: true,
         }),
       ),
@@ -239,7 +239,7 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
         for (const c of list.value) await mother.engine.stopAndRemove(c.id);
     });
     expect(mother.freshAdminPassword).toBeDefined();
-    const motherApi = "https://plat.localtest.me:18443";
+    const motherApi = "https://plat.localtest.me:28443";
     const motherCaFile = join(mother.sd.certsDir, "ca.crt");
     const adminAuth = `plat:${mother.freshAdminPassword}`;
 
@@ -253,7 +253,7 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
       shipApp(ada, {
         app: "hello",
         host: "hello-ada.plat.localtest.me",
-        httpsPort: 18443,
+        httpsPort: 28443,
         caFile: motherCaFile,
       }),
     );
@@ -281,8 +281,8 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
         await Platform.germinate(seedFile, {
           root: join(base, "daughter"),
           domain: "d1.localtest.me",
-          httpPort: 18081,
-          httpsPort: 18444,
+          httpPort: 28081,
+          httpsPort: 28444,
           custodyAck: true,
         }),
       ),
@@ -336,7 +336,7 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
     // 10. daughter runs the same journey — warm layer cache does the rest.
     const bob = await phase("daughter: user+pat", 1_500, () =>
       makeUserWithPat(
-        "https://d1.localtest.me:18444",
+        "https://d1.localtest.me:28444",
         daughter.caCertPem,
         `plat:${daughter.freshAdminPassword}`,
         "bob",
@@ -346,7 +346,7 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
       shipApp(bob, {
         app: "hello",
         host: "hello-bob.d1.localtest.me",
-        httpsPort: 18444,
+        httpsPort: 28444,
         caFile: join(daughter.sd.certsDir, "ca.crt"),
       }),
     );

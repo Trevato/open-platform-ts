@@ -26,6 +26,7 @@ import {
 } from "@op/secrets";
 import { Store } from "@op/store";
 import { apiRouter } from "./api.ts";
+import { consoleRouter } from "./console/index.ts";
 import {
   commitFiles,
   readSecretsFile,
@@ -207,14 +208,24 @@ export class Platform {
           store,
           forge,
           git,
+          engine,
           reconciler,
           domain: opts.domain,
           log,
         });
+        const consoleRoutes = consoleRouter({
+          forge,
+          store,
+          git,
+          sd,
+          domain: opts.domain,
+        });
+        // API/git win first (machines); the console is the human face fallback.
         const platformHandler = async (req: Request): Promise<Response> => {
           return (
             (await forgeRoutes(req)) ??
             (await apiRoutes(req)) ??
+            (await consoleRoutes(req)) ??
             Response.json({ error: "not found" }, { status: 404 })
           );
         };

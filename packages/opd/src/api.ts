@@ -1,26 +1,32 @@
 import type { Log, StateDir } from "@op/core";
 import { isValidName } from "@op/core";
 import { listSnapshots, snapshot } from "@op/data";
+import type { Engine } from "@op/engine";
 import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
 import type { Store } from "@op/store";
-import { appSpecPath, commitFiles, TEMPLATE } from "./gitops.ts";
+import { appSpecPath, commitFiles, readAppSpecs, TEMPLATE } from "./gitops.ts";
 import { hostFor, type AppSpec } from "./policy.ts";
 import type { Reconciler } from "./reconcile.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
-// Platform API: the mediated surface. Every mutation authenticates via the
-// forge and is authorized against git permissions before it touches state.
-export function apiRouter(deps: {
+export interface ApiDeps {
   sd: StateDir;
   store: Store;
   forge: Forge;
   git: GitHost;
+  engine: Engine;
   reconciler: Reconciler;
   domain: string;
   log: Log;
-}): (req: Request) => Promise<Response | null> {
+}
+
+// Platform API: the mediated surface. Every mutation authenticates via the
+// forge and is authorized against git permissions before it touches state.
+export function apiRouter(
+  deps: ApiDeps,
+): (req: Request) => Promise<Response | null> {
   return async (req) => {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -70,14 +76,61 @@ export function apiRouter(deps: {
           owner: user.username,
           app: name,
           host: hostFor(spec, deps.domain),
-          cloneUrl: `https://${deps.domain}/${user.username}/${name}.git`,
+          // Honor the port the client actually reached us on (local high-port
+          // dev vs a real :443 deploy) — the domain alone loses it.
+          cloneUrl: `https://${url.host}/${user.username}/${name}.git`,
         },
         201,
       );
     }
 
+    // GET /api/v1/apps — desired apps (from gitops) overlaid with observed state.
+    if (req.method === "GET" && path === "/api/v1/apps") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const specs = await readAppSpecs(deps.git, deps.domain);
+      if (specs.status === "error")
+        return json({ error: specs.error.message }, 500);
+      const apps = specs.value.map((s) => {
+        const status = deps.store.getAppStatus(s.owner, s.app);
+        return {
+          owner: s.owner,
+          app: s.app,
+          host: hostFor(s, deps.domain),
+          state: status?.state ?? "pending",
+          message: status?.message ?? null,
+          updatedAt: status?.updated_at ?? null,
+        };
+      });
+      return json({ apps });
+    }
+
+    // GET /api/v1/apps/:owner/:app/logs — tail the running container.
+    let m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)\/logs$/);
+    if (req.method === "GET" && m) {
+      const [, owner, app] = m as unknown as [string, string, string];
+      if (!isValidName(owner) || !isValidName(app))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, app, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const status = deps.store.getAppStatus(owner, app);
+      if (!status?.container_id)
+        return new Response("(no running container)", { status: 200 });
+      const logs = await deps.engine.logs(status.container_id, { tail: 200 });
+      return new Response(
+        logs.status === "ok"
+          ? logs.value
+          : `(logs unavailable: ${logs.error.message})`,
+        {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        },
+      );
+    }
+
     // GET /api/v1/apps/:owner/:app — status.
-    let m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)$/);
+    m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)$/);
     if (req.method === "GET" && m) {
       const [, owner, app] = m as unknown as [string, string, string];
       if (!isValidName(owner) || !isValidName(app))
