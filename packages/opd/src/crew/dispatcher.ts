@@ -4,11 +4,14 @@ import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
 import type { IssueRow, Store, UserRow } from "@op/store";
 import { runBuilder } from "./builder.ts";
+import { runReviewer } from "./reviewer.ts";
 
 const WORK_LABEL = "agent-work";
 const BUILDING_LABEL = "agent-building";
+const REVIEWING_LABEL = "agent-reviewing";
 const SHIPPED_LABEL = "agent-shipped";
 const FAILED_LABEL = "agent-failed";
+const REVIEW_FAILED_LABEL = "agent-review-failed";
 
 export interface DispatcherDeps {
   sd: StateDir;
@@ -22,9 +25,17 @@ export interface DispatcherDeps {
   /** Bound model runner, or null when no Claude credential is configured. */
   runAgent: RunAgent | null;
   oauthToken: string | null;
+  /** Platform CA (path + text) for the reviewer's TLS to the preview/issuer. */
+  caFile: string;
+  ca: string;
+  /** Low-privilege QA identity the reviewer signs in as. */
+  qaUser: string;
+  qaPassword: string;
   /** Kick the deploy reconciler so a crew-opened PR gets its preview built
    *  (the builder opens the PR in-process, so no push event fires). */
   kickReconciler: () => void;
+  /** Override the "is the preview serving?" probe (tests inject a stub). */
+  previewIsUp?: (previewHost: string) => Promise<boolean>;
   log: Log;
 }
 
@@ -148,19 +159,136 @@ export class Dispatcher {
     // build its preview environment with forked data.
     this.deps.kickReconciler();
 
+    const pr = built.value.prNumber;
     const port = this.portSuffix();
-    const prUrl = `https://${this.deps.domain}${port}/apps/${issue.owner}/${issue.repo}/pulls/${built.value.prNumber}`;
-    const previewHost = `pr-${built.value.prNumber}-${issue.repo}-${issue.owner}.${this.deps.domain}${port}`;
-    this.setLabels(issue, [...labels, SHIPPED_LABEL]);
+    const prUrl = `https://${this.deps.domain}${port}/apps/${issue.owner}/${issue.repo}/pulls/${pr}`;
+    const previewHost = `pr-${pr}-${issue.repo}-${issue.owner}.${this.deps.domain}`;
+    this.setLabels(issue, [...labels, REVIEWING_LABEL]);
     this.comment(
       issue,
-      `✅ Opened PR #${built.value.prNumber} → ${prUrl}\n\nA preview with forked prod data is spinning up at https://${previewHost}/ (cost $${built.value.costUsd.toFixed(2)}). Review and merge to ship.`,
+      `🏗️ Opened PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). Preview spinning up; the reviewer will browser-test it.`,
     );
     log.info("crew: PR opened", {
       issue: this.key(issue),
-      pr: built.value.prNumber,
+      pr,
       cost: built.value.costUsd,
     });
+
+    // Wait for the preview to actually serve before reviewing it.
+    const previewUp = await this.waitForPreview(previewHost);
+    if (!previewUp) {
+      this.setLabels(issue, [...labels, FAILED_LABEL]);
+      this.comment(
+        issue,
+        `❌ PR #${pr}'s preview never came up — a human should look. PR left open.`,
+      );
+      return;
+    }
+
+    // Review: a caged agent tries to break the live preview and returns a verdict.
+    this.comment(
+      issue,
+      "🔍 Reviewer testing the preview (sign-in, feature, injection, bad input)…",
+    );
+    const verdict = await runReviewer(
+      {
+        domain: this.deps.domain,
+        httpsPort: this.deps.httpsPort,
+        genesisDir: this.deps.genesisDir,
+        caFile: this.deps.caFile,
+        runAgent: this.deps.runAgent,
+        oauthToken: this.deps.oauthToken,
+        qaUser: this.deps.qaUser,
+        qaPassword: this.deps.qaPassword,
+        log,
+        onProgress: (line) => this.comment(issue, line),
+      },
+      {
+        owner: issue.owner,
+        repo: issue.repo,
+        prNumber: pr,
+        issueBody: issue.body,
+        issueTitle: issue.title,
+      },
+    );
+
+    if (verdict.status === "error") {
+      this.setLabels(issue, [...labels, FAILED_LABEL]);
+      this.comment(
+        issue,
+        `❌ Review couldn't run: ${verdict.error.message}. PR #${pr} left open for a human.`,
+      );
+      return;
+    }
+
+    const v = verdict.value;
+    this.comment(
+      issue,
+      `${v.line}\n\n(reviewer cost $${v.costUsd.toFixed(2)})`,
+    );
+
+    if (v.kind === "pass" || v.kind === "concerns") {
+      // Auto-merge on a pass → ship to prod + tear down the preview.
+      const merged = await this.deps.forge.mergePr(
+        this.deps.systemActor,
+        issue.owner,
+        issue.repo,
+        pr,
+      );
+      if (merged.status === "error") {
+        this.setLabels(issue, [...labels, FAILED_LABEL]);
+        this.comment(
+          issue,
+          `Reviewer passed, but merge failed: ${merged.error.message}. PR #${pr} left open.`,
+        );
+        return;
+      }
+      this.deps.kickReconciler(); // ship the merge + tear down the preview
+      this.setLabels(issue, [...labels, SHIPPED_LABEL]);
+      this.deps.store.setIssueState(
+        issue.owner,
+        issue.repo,
+        issue.number,
+        "closed",
+      );
+      this.comment(
+        issue,
+        `🚀 Merged PR #${pr} and shipping to production. Issue closed.`,
+      );
+      log.info("crew: shipped", { issue: this.key(issue), pr });
+    } else {
+      // ❌ FAIL / UNTESTABLE / unclear verdict — leave the PR for a human.
+      this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
+      this.comment(
+        issue,
+        `The reviewer did not pass this. PR #${pr} is left open for a human to decide.`,
+      );
+      log.info("crew: review not passed", {
+        issue: this.key(issue),
+        pr,
+        verdict: v.kind,
+      });
+    }
+  }
+
+  /** Poll the preview host until it serves (or give up). Reaches it via the
+   *  gate on 127.0.0.1 (the pr- host resolves there through *.localtest.me). */
+  private async waitForPreview(previewHost: string): Promise<boolean> {
+    if (this.deps.previewIsUp) return this.deps.previewIsUp(previewHost);
+    const url = `https://${previewHost}${this.portSuffix()}/`;
+    for (let i = 0; i < 120; i++) {
+      try {
+        const res = await fetch(url, {
+          tls: { ca: this.deps.ca },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) return true;
+      } catch {
+        /* not up yet */
+      }
+      await Bun.sleep(2000);
+    }
+    return false;
   }
 
   // Non-443 dev ports must appear in the console/preview links.

@@ -60,6 +60,7 @@ export interface PlatformOpts {
 }
 
 const ADMIN_USER = "plat";
+const QA_USER = "qa";
 
 function defaultGenesisDir(): string {
   // packages/opd/src → repo root/genesis. Compiled binaries must pass genesisDir.
@@ -183,10 +184,12 @@ export class Platform {
         // OUR key and name exactly one recipient. Fail loud, not 20 min later.
         const secretsFile = Result.unwrap(await readSecretsFile(git));
         Result.unwrap(await verifyAllSealed(key.identity, secretsFile));
+        const plainSecrets = Result.unwrap(
+          await openAll(key.identity, secretsFile),
+        );
 
         if (!store.getUser(ADMIN_USER)) {
-          const plain = Result.unwrap(await openAll(key.identity, secretsFile));
-          const password = plain["ADMIN_PASSWORD"];
+          const password = plainSecrets["ADMIN_PASSWORD"];
           if (!password) throw new Error("secrets file has no ADMIN_PASSWORD");
           Result.unwrap(
             await forge.createUser(ADMIN_USER, password, {
@@ -195,6 +198,15 @@ export class Platform {
             }),
           );
           freshAdminPassword = password;
+        }
+
+        // The crew reviewer's low-privilege QA identity — a normal signed-in
+        // user, no special rights, used to browser-test previews.
+        const qaPassword = plainSecrets["QA_PASSWORD"] ?? "";
+        if (qaPassword && !store.getUser(QA_USER)) {
+          Result.unwrap(
+            await forge.createUser(QA_USER, qaPassword, { system: true }),
+          );
         }
 
         const ca = Result.unwrap(await ensureCa(sd.certsDir, opts.domain));
@@ -300,6 +312,10 @@ export class Platform {
               )
             : null,
           oauthToken: claudeToken,
+          caFile: join(sd.certsDir, "ca.crt"),
+          ca: ca.caCert,
+          qaUser: QA_USER,
+          qaPassword,
           kickReconciler: () => void reconciler.kickAll(),
           log,
         });

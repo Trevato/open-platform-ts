@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,9 +9,62 @@ import { Forge } from "@op/forge";
 import { GitHost } from "@op/git";
 import { Store, type UserRow } from "@op/store";
 import { runBuilder } from "../src/crew/builder.ts";
-import { Dispatcher } from "../src/crew/dispatcher.ts";
+import { Dispatcher, type DispatcherDeps } from "../src/crew/dispatcher.ts";
+import { parseVerdict } from "../src/crew/reviewer.ts";
 
 const GENESIS = join(import.meta.dir, "..", "..", "..", "genesis");
+
+// The fake runner plays both roles: as the reviewer (cwd has REVIEW.md) it
+// returns a verdict line; as the builder it writes a feature file.
+function fakeCrew(verdict: string): RunAgent {
+  return async (run) => {
+    if (existsSync(join(run.cwd, "REVIEW.md")))
+      return Result.ok({
+        ok: true,
+        result: verdict,
+        costUsd: 0.02,
+        numTurns: 2,
+      });
+    await writeFile(join(run.cwd, "FEATURE.md"), "implemented by the crew\n");
+    return Result.ok({ ok: true, result: "done", costUsd: 0.05, numTurns: 3 });
+  };
+}
+
+// Common dispatcher deps for the review/merge tests: preview always "up",
+// a real (throwaway) CA file so the reviewer can read it.
+function dispatcherReviewDeps(
+  h: Awaited<ReturnType<typeof harness>>,
+  runAgent: RunAgent | null,
+  extra: Partial<DispatcherDeps> = {},
+): DispatcherDeps {
+  const caDir = mkdtempSync(join(tmpdir(), "op-ca-"));
+  dirs.push(caDir);
+  const caFile = join(caDir, "ca.crt");
+  writeFileSync(
+    caFile,
+    "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n",
+  );
+  return {
+    sd: h.sd,
+    store: h.store,
+    forge: h.forge,
+    git: h.git,
+    domain: "plat.localtest.me",
+    httpsPort: 18443,
+    genesisDir: GENESIS,
+    systemActor: h.admin,
+    runAgent,
+    oauthToken: runAgent ? "sk-ant-oat01-test" : null,
+    caFile,
+    ca: "",
+    qaUser: "qa",
+    qaPassword: "qa-pass",
+    kickReconciler: () => {},
+    previewIsUp: async () => true,
+    log: createLog("disp"),
+    ...extra,
+  };
+}
 
 let dirs: string[] = [];
 afterEach(() => {
@@ -104,13 +157,47 @@ describe("builder", () => {
   });
 });
 
+// tick() fires process() unawaited, so poll until the issue reaches a terminal
+// label (the full flow is build → review → merge, with real git + fetches).
+const TERMINAL = ["agent-shipped", "agent-failed", "agent-review-failed"];
+async function settle(
+  h: Awaited<ReturnType<typeof harness>>,
+  num = 1,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    const issue = h.store.getIssue("plat", "app", num);
+    const labels = issue?.labels.split(",") ?? [];
+    if (TERMINAL.some((t) => labels.includes(t))) return;
+    await Bun.sleep(40);
+  }
+}
+
+describe("verdict parsing", () => {
+  test("picks the last marker line as the ship/no-ship decision", () => {
+    expect(parseVerdict("blah\n✅ PASS — works").kind).toBe("pass");
+    expect(parseVerdict("⚠️ PASS WITH CONCERNS — slow").kind).toBe("concerns");
+    expect(parseVerdict("notes\n❌ FAIL — SQLi in /add").kind).toBe("fail");
+    expect(parseVerdict("❌ UNTESTABLE — preview 502").kind).toBe("untestable");
+    expect(parseVerdict("no verdict at all").kind).toBe("unknown");
+  });
+});
+
 describe("dispatcher", () => {
-  test("agent-work issue → build → PR → labeled shipped, exactly once", async () => {
+  test("build → PR → review passes → auto-merge + ship, exactly once", async () => {
     const h = await harness();
-    let runs = 0;
-    const counting: RunAgent = async (run) => {
-      runs++;
-      await writeFile(join(run.cwd, "FEATURE.md"), `run ${runs}\n`);
+    let builds = 0;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md")))
+        return Result.ok({
+          ok: true,
+          result: "✅ PASS — todo works, auth holds",
+          costUsd: 0.02,
+          numTurns: 2,
+        });
+      builds++;
+      await writeFile(join(run.cwd, "FEATURE.md"), `run ${builds}\n`);
       await Bun.sleep(50); // keep it inflight so a concurrent tick would collide
       return Result.ok({
         ok: true,
@@ -119,20 +206,12 @@ describe("dispatcher", () => {
         numTurns: 1,
       });
     };
-    const d = new Dispatcher({
-      sd: h.sd,
-      store: h.store,
-      forge: h.forge,
-      git: h.git,
-      domain: "plat.localtest.me",
-      httpsPort: 18443,
-      genesisDir: GENESIS,
-      systemActor: h.admin,
-      runAgent: counting,
-      oauthToken: "sk-ant-oat01-test",
-      kickReconciler: () => {},
-      log: createLog("disp"),
-    });
+    let reconcileKicks = 0;
+    const d = new Dispatcher(
+      dispatcherReviewDeps(h, runAgent, {
+        kickReconciler: () => void reconcileKicks++,
+      }),
+    );
     h.store.createIssue("plat", "app", {
       title: "build me",
       body: "please",
@@ -142,37 +221,90 @@ describe("dispatcher", () => {
 
     // Fire several ticks at once — idempotency must build exactly one PR.
     await Promise.all([d.tick(), d.tick(), d.tick()]);
-    await Bun.sleep(200); // let the inflight build finish
+    await settle(h);
 
-    expect(runs).toBe(1);
-    expect(h.store.getPr("plat", "app", 1)?.number).toBe(1);
+    expect(builds).toBe(1);
+    const pr = h.store.getPr("plat", "app", 1);
+    expect(pr?.number).toBe(1);
+    expect(pr?.state).toBe("merged"); // auto-merged on a passing verdict
     const issue = h.store.getIssue("plat", "app", 1)!;
     expect(issue.labels.split(",")).toContain("agent-shipped");
-    expect(issue.labels.split(",")).not.toContain("agent-work");
+    expect(issue.state).toBe("closed");
+    expect(reconcileKicks).toBe(2); // once for the preview, once to ship the merge
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("Opened PR #1");
-    expect(comments).toContain("preview");
+    expect(comments).toContain("✅ PASS");
+    expect(comments).toContain("Merged PR #1");
+  });
+
+  test("review FAILs → PR left open for a human, not merged", async () => {
+    const h = await harness();
+    const d = new Dispatcher(
+      dispatcherReviewDeps(
+        h,
+        fakeCrew("❌ FAIL — stored XSS in the message field"),
+      ),
+    );
+    h.store.createIssue("plat", "app", {
+      title: "guestbook",
+      body: "messages",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    await d.tick();
+    await settle(h);
+
+    const pr = h.store.getPr("plat", "app", 1);
+    expect(pr?.number).toBe(1); // the PR exists…
+    expect(pr?.state).toBe("open"); // …but was NOT merged
+    const issue = h.store.getIssue("plat", "app", 1)!;
+    expect(issue.labels.split(",")).toContain("agent-review-failed");
+    expect(issue.labels.split(",")).not.toContain("agent-shipped");
+    const comments = h.store
+      .listComments("plat", "app", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("❌ FAIL");
+    expect(comments).toContain("left open for a human");
+  });
+
+  test("preview never comes up → fails without reviewing", async () => {
+    const h = await harness();
+    let reviewed = false;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md"))) reviewed = true;
+      else await writeFile(join(run.cwd, "FEATURE.md"), "x\n");
+      return Result.ok({
+        ok: true,
+        result: "✅ PASS — x",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    };
+    const d = new Dispatcher(
+      dispatcherReviewDeps(h, runAgent, { previewIsUp: async () => false }),
+    );
+    h.store.createIssue("plat", "app", {
+      title: "x",
+      body: "",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    await d.tick();
+    await settle(h);
+
+    expect(reviewed).toBe(false); // never reviewed a preview that never came up
+    const issue = h.store.getIssue("plat", "app", 1)!;
+    expect(issue.labels.split(",")).toContain("agent-failed");
+    expect(h.store.getPr("plat", "app", 1)?.state).toBe("open");
   });
 
   test("without a credential, posts a note and does not build", async () => {
     const h = await harness();
-    const d = new Dispatcher({
-      sd: h.sd,
-      store: h.store,
-      forge: h.forge,
-      git: h.git,
-      domain: "plat.localtest.me",
-      httpsPort: 443,
-      genesisDir: GENESIS,
-      systemActor: h.admin,
-      runAgent: null,
-      oauthToken: null,
-      kickReconciler: () => {},
-      log: createLog("disp"),
-    });
+    const d = new Dispatcher(dispatcherReviewDeps(h, null, { httpsPort: 443 }));
     h.store.createIssue("plat", "app", {
       title: "x",
       body: "",

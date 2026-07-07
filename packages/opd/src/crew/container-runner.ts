@@ -97,7 +97,8 @@ export function makeContainerRunner(
       user: "1000:1000",
       network: AGENT_NETWORK,
       workdir: "/work",
-      binds: [`${run.cwd}:/work`],
+      binds: [`${run.cwd}:/work`, ...(run.extraBinds ?? [])],
+      ...(run.extraHosts?.length ? { extraHosts: run.extraHosts } : {}),
       env: {
         HOME: "/tmp",
         CLAUDE_CONFIG_DIR: "/tmp/.claude",

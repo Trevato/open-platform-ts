@@ -19,6 +19,9 @@ export type SecretSpec = Record<string, () => string>;
 // a parent ever survives a fork (the ciphertext in a seed is inert).
 export const PLATFORM_SECRETS: SecretSpec = {
   ADMIN_PASSWORD: () => generatePassword(24),
+  // The crew reviewer signs in as a low-privilege QA user to browser-test
+  // previews; this is its password (regenerated per platform).
+  QA_PASSWORD: () => generatePassword(24),
   SESSION_KEY: () => randomHex(32),
   WEBHOOK_HMAC: () => randomHex(32),
 };

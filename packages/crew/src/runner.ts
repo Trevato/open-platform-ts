@@ -23,6 +23,12 @@ export interface AgentRun {
   idleTimeoutMs: number;
   /** Hard cap on total wall-clock (ms). */
   hardTimeoutMs: number;
+  /** Extra read-only host binds for the sandbox, e.g. a CA at /etc/op/ca.crt
+   *  (container runner only; ignored by the host/fake runners). */
+  extraBinds?: string[];
+  /** Extra Docker ExtraHosts, e.g. "pr-1-app-ada.plat.localtest.me:host-gateway"
+   *  so a reviewer can reach the preview + issuer (container runner only). */
+  extraHosts?: string[];
   /** Per-line stream callback (JSONL heartbeat). */
   onLine?: (line: string) => void;
   log?: Log;

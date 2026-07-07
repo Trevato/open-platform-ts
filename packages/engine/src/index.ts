@@ -428,6 +428,7 @@ export class Engine {
     workdir?: string;
     user?: string;
     network?: string;
+    extraHosts?: string[]; // Docker ExtraHosts (e.g. host-gateway maps)
     memoryBytes?: number;
     nanoCpus?: number;
     pidsLimit?: number;
@@ -448,6 +449,7 @@ export class Engine {
       PidsLimit: spec.pidsLimit ?? 512,
       NetworkMode: spec.network ?? "bridge",
       RestartPolicy: { Name: "no" },
+      ...(spec.extraHosts?.length ? { ExtraHosts: spec.extraHosts } : {}),
     };
 
     const created = await this.request(op, `${API}/containers/create`, {
