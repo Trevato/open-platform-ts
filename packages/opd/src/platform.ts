@@ -332,6 +332,11 @@ export class Platform {
           ca: ca.caCert,
           qaUser: QA_USER,
           qaPassword,
+          ...(process.env["OP_FORCE_FIRST_REVIEW_FAIL"]
+            ? {
+                forceFirstReviewFail: process.env["OP_FORCE_FIRST_REVIEW_FAIL"],
+              }
+            : {}),
           kickReconciler: () => void reconciler.kickAll(),
           log,
         });

@@ -325,6 +325,56 @@ describe("dispatcher", () => {
     expect(comments).toContain("Merged PR #1");
   });
 
+  test("forceFirstReviewFail hook: injects a ❌, then the real re-review ships", async () => {
+    const h = await harness();
+    let builds = 0;
+    let reviews = 0;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md"))) {
+        reviews++; // only the SECOND review is real; the first is injected
+        return Result.ok({
+          ok: true,
+          result: "✅ PASS — fixed",
+          costUsd: 0.02,
+          numTurns: 2,
+        });
+      }
+      builds++;
+      await writeFile(join(run.cwd, "FEATURE.md"), `build ${builds}\n`);
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.03,
+        numTurns: 2,
+      });
+    };
+    const d = new Dispatcher(
+      dispatcherReviewDeps(h, runAgent, {
+        maxRework: 1,
+        forceFirstReviewFail: "add a length limit",
+      }),
+    );
+    h.store.createIssue("plat", "app", {
+      title: "board",
+      body: "b",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    await d.tick();
+    await settle(h);
+
+    expect(builds).toBe(2); // initial + one rework
+    expect(reviews).toBe(1); // the first verdict was injected, not a real review
+    expect(h.store.getPr("plat", "app", 1)?.state).toBe("merged");
+    const comments = h.store
+      .listComments("plat", "app", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("add a length limit");
+    expect(comments).toContain("demonstrate auto-rework");
+    expect(comments).toContain("Merged PR #1");
+  });
+
   test("rework exhausted: persistent ❌ → parked after N attempts", async () => {
     const h = await harness();
     let builds = 0;

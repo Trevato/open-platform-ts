@@ -41,6 +41,10 @@ export interface DispatcherDeps {
   /** How many times to feed a ❌ verdict back to the builder before parking
    *  for a human. 0 disables rework. Defaults to 2. */
   maxRework?: number;
+  /** Ops/demo hook: when set, the FIRST review of each issue is skipped and
+   *  returns this string as a ❌ blocker, so the rework loop can be exercised
+   *  end-to-end against a real (fixable) requirement. Later reviews are real. */
+  forceFirstReviewFail?: string;
   log: Log;
 }
 
@@ -196,26 +200,45 @@ export class Dispatcher {
         issue,
         "🔍 Reviewer testing the preview (sign-in, feature, injection, bad input)…",
       );
-      const verdict = await runReviewer(this.reviewerDeps(issue), {
-        owner: issue.owner,
-        repo: issue.repo,
-        prNumber: pr,
-        issueBody: issue.body,
-        issueTitle: issue.title,
-      });
-      if (verdict.status === "error")
-        return this.park(
+      let v: {
+        kind: "pass" | "concerns" | "fail" | "untestable" | "unknown";
+        line: string;
+        costUsd: number;
+      };
+      if (attempt === 0 && this.deps.forceFirstReviewFail) {
+        // Ops/demo hook: force a real, fixable blocker on the FIRST review so
+        // the auto-rework loop runs end-to-end. The re-review below is real.
+        v = {
+          kind: "fail",
+          line: `❌ FAIL — ${this.deps.forceFirstReviewFail}`,
+          costUsd: 0,
+        };
+        this.comment(
           issue,
-          labels,
-          pr,
-          `the review couldn't run (${verdict.error.message})`,
-          FAILED_LABEL,
+          `${v.line}\n\n(injected to demonstrate auto-rework end-to-end)`,
         );
-      const v = verdict.value;
-      this.comment(
-        issue,
-        `${v.line}\n\n(reviewer cost $${v.costUsd.toFixed(2)})`,
-      );
+      } else {
+        const verdict = await runReviewer(this.reviewerDeps(issue), {
+          owner: issue.owner,
+          repo: issue.repo,
+          prNumber: pr,
+          issueBody: issue.body,
+          issueTitle: issue.title,
+        });
+        if (verdict.status === "error")
+          return this.park(
+            issue,
+            labels,
+            pr,
+            `the review couldn't run (${verdict.error.message})`,
+            FAILED_LABEL,
+          );
+        v = verdict.value;
+        this.comment(
+          issue,
+          `${v.line}\n\n(reviewer cost $${v.costUsd.toFixed(2)})`,
+        );
+      }
 
       // ✅/⚠️ → auto-merge, ship, done.
       if (v.kind === "pass" || v.kind === "concerns") {
