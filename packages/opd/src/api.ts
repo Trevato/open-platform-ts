@@ -18,6 +18,8 @@ export interface ApiDeps {
   git: GitHost;
   engine: Engine;
   reconciler: Reconciler;
+  /** Wake the crew dispatcher (issue labeled agent-work). */
+  kickCrew: () => void;
   domain: string;
   log: Log;
 }
@@ -226,7 +228,7 @@ export function apiRouter(
             { error: issue.error.message },
             issue.error.code === "not_found" ? 404 : 400,
           );
-        void deps.reconciler.kickAll(); // an agent-work issue wakes the crew
+        deps.kickCrew(); // an agent-work issue wakes the crew
         return json(issue.value, 201);
       }
     }
@@ -294,7 +296,7 @@ export function apiRouter(
             { error: r.error.message },
             r.error.code === "unauthorized" ? 403 : 400,
           );
-        void deps.reconciler.kickAll(); // labeling agent-work wakes the crew
+        deps.kickCrew(); // labeling agent-work wakes the crew
         return json(r.value);
       }
       const closed = deps.forge.closeIssue(user, owner, repo, n);

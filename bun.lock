@@ -21,6 +21,13 @@
         "better-result": "2.9.2",
       },
     },
+    "packages/crew": {
+      "name": "@op/crew",
+      "version": "0.0.1",
+      "dependencies": {
+        "@op/core": "workspace:*",
+      },
+    },
     "packages/data": {
       "name": "@op/data",
       "version": "0.0.1",
@@ -85,6 +92,7 @@
       },
       "dependencies": {
         "@op/core": "workspace:*",
+        "@op/crew": "workspace:*",
         "@op/data": "workspace:*",
         "@op/engine": "workspace:*",
         "@op/forge": "workspace:*",
@@ -122,6 +130,8 @@
     "@noble/post-quantum": ["@noble/post-quantum@0.5.4", "", { "dependencies": { "@noble/curves": "~2.0.0", "@noble/hashes": "~2.0.0" } }, "sha512-leww0zzIirrvwaYMPI9fj6aRIlA/c6Y0/lifQQ1YOOyHEr0MNH3yYpjXeiVG+tWdPps4XxGclFWX2INPO3Yo5w=="],
 
     "@op/core": ["@op/core@workspace:packages/core"],
+
+    "@op/crew": ["@op/crew@workspace:packages/crew"],
 
     "@op/data": ["@op/data@workspace:packages/data"],
 

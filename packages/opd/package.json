@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@op/core": "workspace:*",
+    "@op/crew": "workspace:*",
     "@op/data": "workspace:*",
     "@op/engine": "workspace:*",
     "@op/forge": "workspace:*",

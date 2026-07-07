@@ -29,6 +29,8 @@ import { apiRouter } from "./api.ts";
 import { consoleRouter } from "./console/index.ts";
 import { oidcRouter } from "./oidc.ts";
 import { ensureSigningKey } from "./oidc-clients.ts";
+import { claudeRunner } from "@op/crew";
+import { Dispatcher } from "./crew/dispatcher.ts";
 import {
   commitFiles,
   readSecretsFile,
@@ -68,6 +70,9 @@ export class Platform {
   /** Set when THIS boot minted the admin user — shown once on the card. */
   freshAdminPassword: string | undefined;
   caCertPem = "";
+  /** True when a Claude credential is configured and the crew can build. */
+  crewCredentialed = false;
+  dispatcher: Dispatcher | undefined;
 
   private constructor(
     readonly sd: StateDir,
@@ -210,6 +215,9 @@ export class Platform {
           log,
         });
 
+        // The dispatcher is created after the router (it needs the reconciler),
+        // so route crew-kicks through a holder the router can call immediately.
+        const crewKick = { fn: () => {} };
         const forgeRoutes = forgeRouter(forge, git);
         const apiRoutes = apiRouter({
           sd,
@@ -218,6 +226,7 @@ export class Platform {
           git,
           engine,
           reconciler,
+          kickCrew: () => crewKick.fn(),
           domain: opts.domain,
           log,
         });
@@ -262,6 +271,34 @@ export class Platform {
         gate.start();
         reconciler.start();
 
+        // The AI build crew. The Claude Code OAuth token is BYO (sk-ant-oat01,
+        // from `claude setup-token`) — the ONLY credential that can drive an
+        // agent. Without it the dispatcher still runs but posts a "set a token"
+        // note on agent-work issues instead of building.
+        const claudeToken = process.env["CLAUDE_CODE_OAUTH_TOKEN"] ?? null;
+        const adminUser = store.getUser(ADMIN_USER);
+        const dispatcher = new Dispatcher({
+          sd,
+          store,
+          forge,
+          git,
+          domain: opts.domain,
+          httpsPort: opts.httpsPort,
+          genesisDir: opts.genesisDir ?? defaultGenesisDir(),
+          systemActor: adminUser ?? {
+            id: "",
+            username: ADMIN_USER,
+            password_hash: "",
+            is_admin: 1,
+            created_at: 0,
+          },
+          runAgent: claudeToken ? claudeRunner : null,
+          oauthToken: claudeToken,
+          log,
+        });
+        crewKick.fn = () => dispatcher.kick();
+        dispatcher.start();
+
         const platform = new Platform(
           sd,
           opts.domain,
@@ -278,10 +315,13 @@ export class Platform {
         );
         platform.freshAdminPassword = freshAdminPassword;
         platform.caCertPem = ca.caCert;
+        platform.crewCredentialed = claudeToken !== null;
+        platform.dispatcher = dispatcher;
         log.info("platform up", {
           domain: opts.domain,
           https: opts.httpsPort,
           isGenesis,
+          crew: claudeToken ? "credentialed" : "no credential",
         });
         return platform;
       },
@@ -444,6 +484,7 @@ export class Platform {
   }
 
   async stop(): Promise<void> {
+    this.dispatcher?.stop();
     this.gate.stop();
     await this.reconciler.stop(); // drain in-flight passes before the store closes
     this.store.close();
