@@ -294,6 +294,7 @@ export class Platform {
           },
           runAgent: claudeToken ? claudeRunner : null,
           oauthToken: claudeToken,
+          kickReconciler: () => void reconciler.kickAll(),
           log,
         });
         crewKick.fn = () => dispatcher.kick();

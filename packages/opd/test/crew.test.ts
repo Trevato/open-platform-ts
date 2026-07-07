@@ -130,6 +130,7 @@ describe("dispatcher", () => {
       systemActor: h.admin,
       runAgent: counting,
       oauthToken: "sk-ant-oat01-test",
+      kickReconciler: () => {},
       log: createLog("disp"),
     });
     h.store.createIssue("plat", "app", {
@@ -169,6 +170,7 @@ describe("dispatcher", () => {
       systemActor: h.admin,
       runAgent: null,
       oauthToken: null,
+      kickReconciler: () => {},
       log: createLog("disp"),
     });
     h.store.createIssue("plat", "app", {

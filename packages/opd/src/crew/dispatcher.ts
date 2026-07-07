@@ -22,6 +22,9 @@ export interface DispatcherDeps {
   /** Bound model runner, or null when no Claude credential is configured. */
   runAgent: RunAgent | null;
   oauthToken: string | null;
+  /** Kick the deploy reconciler so a crew-opened PR gets its preview built
+   *  (the builder opens the PR in-process, so no push event fires). */
+  kickReconciler: () => void;
   log: Log;
 }
 
@@ -140,6 +143,10 @@ export class Dispatcher {
       );
       return;
     }
+
+    // The PR was opened in-process (no push event), so kick the reconciler to
+    // build its preview environment with forked data.
+    this.deps.kickReconciler();
 
     const port = this.portSuffix();
     const prUrl = `https://${this.deps.domain}${port}/apps/${issue.owner}/${issue.repo}/pulls/${built.value.prNumber}`;
