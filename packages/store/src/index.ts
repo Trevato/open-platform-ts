@@ -636,11 +636,12 @@ export class Store {
   }
 
   listComments(owner: string, repo: string, number: number): IssueCommentRow[] {
+    // rowid is monotonic insertion order; the text id is random, so never sort by it.
     return this.db
       .query<
         IssueCommentRow,
         [string, string, number]
-      >("SELECT * FROM issue_comments WHERE owner = ? AND repo = ? AND number = ? ORDER BY id ASC")
+      >("SELECT * FROM issue_comments WHERE owner = ? AND repo = ? AND number = ? ORDER BY rowid ASC")
       .all(owner, repo, number);
   }
 }
