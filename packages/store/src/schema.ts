@@ -81,4 +81,19 @@ export const MIGRATIONS: readonly string[] = [
     expires_at     INTEGER NOT NULL
   );
   `,
+  `
+  CREATE TABLE pull_requests (
+    id         TEXT PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    number     INTEGER NOT NULL,
+    title      TEXT NOT NULL,
+    head_ref   TEXT NOT NULL,
+    base_ref   TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'open',
+    author     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(owner, repo, number)
+  );
+  `,
 ];

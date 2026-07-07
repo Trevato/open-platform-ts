@@ -325,6 +325,98 @@ export class GitHost {
     );
   }
 
+  async listBranches(
+    owner: string,
+    name: string,
+  ): Promise<Result<string[], GitError>> {
+    const dir = this.dir("listBranches", owner, name);
+    if (dir.status === "error") return dir as Result<never, GitError>;
+    const r = await this.git(
+      "listBranches",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+      { cwd: dir.value },
+    );
+    return r.map((b) =>
+      new TextDecoder()
+        .decode(b)
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+  }
+
+  // Changed files between base and head (the three-dot form: changes on head
+  // since it diverged from base — exactly what a PR shows).
+  async diffStat(
+    owner: string,
+    name: string,
+    base: string,
+    head: string,
+  ): Promise<Result<{ files: string[]; patch: string }, GitError>> {
+    const op = "diffStat";
+    const dir = this.dir(op, owner, name);
+    if (dir.status === "error") return dir as Result<never, GitError>;
+    for (const ref of [base, head]) {
+      if (ref.startsWith("-") || ref.includes(".."))
+        return Result.err(new GitError({ message: `invalid ref: ${ref}`, op }));
+    }
+    const range = `${base}...${head}`;
+    const names = await this.git(op, ["diff", "--name-only", range], {
+      cwd: dir.value,
+    });
+    if (names.status === "error") return names as Result<never, GitError>;
+    const patch = await this.git(op, ["diff", "--stat", range], {
+      cwd: dir.value,
+    });
+    if (patch.status === "error") return patch as Result<never, GitError>;
+    return Result.ok({
+      files: new TextDecoder().decode(names.value).split("\n").filter(Boolean),
+      patch: new TextDecoder().decode(patch.value),
+    });
+  }
+
+  // Merge head into base and push. Temp clone (local, ms) → merge → push; a
+  // conflict returns an error and leaves the bare repo untouched.
+  async mergeBranch(
+    owner: string,
+    name: string,
+    base: string,
+    head: string,
+    message: string,
+  ): Promise<Result<void, GitError>> {
+    const op = "mergeBranch";
+    const dir = this.dir(op, owner, name);
+    if (dir.status === "error") return dir as Result<never, GitError>;
+    const tmp = await mkdtemp(join(tmpdir(), "op-merge-"));
+    try {
+      const work = join(tmp, "work");
+      const steps: string[][] = [
+        ["clone", dir.value, work],
+        [...AUTHOR_FLAGS, "-C", work, "checkout", base],
+        [
+          ...AUTHOR_FLAGS,
+          "-C",
+          work,
+          "merge",
+          "--no-ff",
+          "-m",
+          message,
+          `origin/${head}`,
+        ],
+        ["-C", work, "push", "origin", `${base}:${base}`],
+      ];
+      for (const args of steps) {
+        const r = await this.git(op, args);
+        if (r.status === "error") return r as Result<never, GitError>;
+      }
+      return Result.ok(undefined);
+    } catch (cause) {
+      return Result.err(new GitError({ message: String(cause), op }));
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  }
+
   async createFromTemplate(
     tpl: { owner: string; name: string },
     owner: string,

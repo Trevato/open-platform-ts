@@ -211,7 +211,9 @@ ${
 
 <div class="mt cols">
   <section>
-    <div class="row between mb"><span class="label">Deploy timeline</span></div>
+    <div class="row between mb"><span class="label">Pull requests</span></div>
+    <div id="prs"><div class="mut" style="font-size:13px">loading…</div></div>
+    <div class="row between mb mt"><span class="label">Deploy timeline</span></div>
     <div class="tl" id="tl"><div class="mut" style="font-size:13px">loading…</div></div>
   </section>
   <section>
@@ -245,6 +247,16 @@ async function tick(){
           '<span class="evt">'+ago(e.ts)+'</span></div>';
       }).join('');}
     }
+    var pl=await fetch('/api/v1/repos/'+KEY+'/pulls?state=open');
+    if(pl.ok){var pj=await pl.json();var pel=document.getElementById('prs');
+      if(!pj.pulls.length){pel.innerHTML='<div class="mut" style="font-size:13px">No open pull requests.</div>';}
+      else{pel.innerHTML=pj.pulls.map(function(pr){
+        return '<a class="ev" style="text-decoration:none" href="/apps/'+KEY+'/pulls/'+pr.number+'">'+
+          '<span class="dot building"></span><span class="ph">#'+pr.number+'</span>'+
+          '<span class="evm mono">'+String(pr.title).replace(/[<>&]/g,'')+'</span>'+
+          '<span class="evt">'+String(pr.head_ref).replace(/[<>&]/g,'')+'→'+String(pr.base_ref).replace(/[<>&]/g,'')+'</span></a>';
+      }).join('');}
+    }
     var bl=await fetch('/api/v1/apps/'+KEY+'/buildlog');
     if(bl.ok){var b=document.getElementById('build');var bt=await bl.text();b.textContent=bt;}
     var lg=await fetch('/api/v1/apps/'+KEY+'/logs');
@@ -257,6 +269,65 @@ async function snap(){
   toast(r.ok?('snapshot '+j.id):(j.error||'snapshot failed'));
 }
 tick();setInterval(tick,1500);`,
+      );
+    }
+
+    // ── pull request detail ─────────────────────────────────────────────
+    const pm = path.match(/^\/apps\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
+    if (pm) {
+      const [, owner, app, num] = pm as unknown as [
+        string,
+        string,
+        string,
+        string,
+      ];
+      const pr = deps.store.getPr(owner, app, Number(num));
+      if (!pr)
+        return page(
+          "Not found",
+          chrome("apps"),
+          `<h1>Not found</h1><p class="sub"><a href="/apps/${esc(owner)}/${esc(app)}">← back</a></p>`,
+          "",
+        );
+      const diff = await deps.git.diffStat(
+        owner,
+        app,
+        pr.base_ref,
+        pr.head_ref,
+      );
+      const patch = diff.status === "ok" ? diff.value.patch : "";
+      const canWrite = deps.forge.authorize(user, owner, app, "write");
+      const isOpen = pr.state === "open";
+      const previewHost = `pr-${pr.number}-${app}-${owner}.${deps.domain}${url.port ? `:${url.port}` : ""}`;
+      const body = `
+<div class="row between"><h1 style="margin:0">#${pr.number} <span style="font-weight:560">${esc(pr.title)}</span></h1>
+<a class="mut" href="/apps/${esc(owner)}/${esc(app)}">← ${esc(app)}</a></div>
+<p class="sub"><span class="dot ${isOpen ? "building" : "running"}"></span> <span class="state">${esc(pr.state)}</span>
+· <span class="mono">${esc(pr.head_ref)} → ${esc(pr.base_ref)}</span> · by ${esc(pr.author)}</p>
+
+<div class="card idcard">
+  <span class="k">Preview</span><span class="v">${isOpen ? `<a href="https://${esc(previewHost)}/" target="_blank" rel="noopener">https://${esc(previewHost)}/</a>` : "—"}</span>
+  <span class="k">Data</span><span class="v mut">copy-on-write clone of prod, isolated to this PR</span>
+</div>
+
+${
+  canWrite && isOpen
+    ? `<div class="row mb"><button onclick="act('merge')">Merge</button><button class="ghost" onclick="act('close')">Close</button></div>`
+    : ""
+}
+<div class="mb"><span class="label">Diff</span></div>
+<pre class="logs">${esc(patch || "(no changes)")}</pre>`;
+      return page(
+        `#${pr.number}`,
+        chrome("apps"),
+        body,
+        `
+async function act(a){
+  var r=await fetch('/api/v1/repos/${esc(owner)}/${esc(app)}/pulls/${pr.number}/'+a,{method:'POST'});
+  var j=await r.json().catch(function(){return{}});
+  if(r.ok){toast(a==='merge'?'merged':'closed');setTimeout(function(){location.href='/apps/${esc(owner)}/${esc(app)}'},700);}
+  else toast(j.error||'failed');
+}`,
       );
     }
 

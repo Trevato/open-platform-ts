@@ -68,6 +68,19 @@ export interface OauthCodeRow {
   expires_at: number;
 }
 
+export interface PullRequestRow {
+  id: string;
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  head_ref: string;
+  base_ref: string;
+  state: string;
+  author: string;
+  created_at: number;
+}
+
 export class Store {
   readonly db: Database;
 
@@ -373,5 +386,96 @@ export class Store {
       if (row) this.db.run("DELETE FROM oauth_codes WHERE code = ?", [code]);
       return row;
     })();
+  }
+
+  // ── pull requests ─────────────────────────────────────────────────────
+  createPr(
+    owner: string,
+    repo: string,
+    fields: { title: string; headRef: string; baseRef: string; author: string },
+  ): PullRequestRow {
+    return this.db.transaction(() => {
+      const max =
+        this.db
+          .query<
+            { n: number | null },
+            [string, string]
+          >("SELECT MAX(number) AS n FROM pull_requests WHERE owner = ? AND repo = ?")
+          .get(owner, repo)?.n ?? 0;
+      const row: PullRequestRow = {
+        id: newId("pr"),
+        owner,
+        repo,
+        number: max + 1,
+        title: fields.title,
+        head_ref: fields.headRef,
+        base_ref: fields.baseRef,
+        state: "open",
+        author: fields.author,
+        created_at: Date.now(),
+      };
+      this.db.run(
+        `INSERT INTO pull_requests (id, owner, repo, number, title, head_ref, base_ref, state, author, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.id,
+          owner,
+          repo,
+          row.number,
+          row.title,
+          row.head_ref,
+          row.base_ref,
+          row.state,
+          row.author,
+          row.created_at,
+        ],
+      );
+      return row;
+    })();
+  }
+
+  getPr(owner: string, repo: string, number: number): PullRequestRow | null {
+    return (
+      this.db
+        .query<
+          PullRequestRow,
+          [string, string, number]
+        >("SELECT * FROM pull_requests WHERE owner = ? AND repo = ? AND number = ?")
+        .get(owner, repo, number) ?? null
+    );
+  }
+
+  listPrs(owner: string, repo: string, state?: string): PullRequestRow[] {
+    if (state) {
+      return this.db
+        .query<
+          PullRequestRow,
+          [string, string, string]
+        >("SELECT * FROM pull_requests WHERE owner = ? AND repo = ? AND state = ? ORDER BY number DESC")
+        .all(owner, repo, state);
+    }
+    return this.db
+      .query<
+        PullRequestRow,
+        [string, string]
+      >("SELECT * FROM pull_requests WHERE owner = ? AND repo = ? ORDER BY number DESC")
+      .all(owner, repo);
+  }
+
+  /** Open PRs across all repos — the reconciler's preview work-list. */
+  listOpenPrs(): PullRequestRow[] {
+    return this.db
+      .query<
+        PullRequestRow,
+        []
+      >("SELECT * FROM pull_requests WHERE state = 'open'")
+      .all();
+  }
+
+  setPrState(owner: string, repo: string, number: number, state: string): void {
+    this.db.run(
+      "UPDATE pull_requests SET state = ? WHERE owner = ? AND repo = ? AND number = ?",
+      [state, owner, repo, number],
+    );
   }
 }

@@ -1,6 +1,6 @@
 import { isValidName, newToken, Result, sha256Hex } from "@op/core";
 import type { GitHost } from "@op/git";
-import type { RepoRow, Store, UserRow } from "@op/store";
+import type { PullRequestRow, RepoRow, Store, UserRow } from "@op/store";
 import { ForgeError } from "./errors.ts";
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -206,5 +206,113 @@ export class Forge {
       );
     }
     return created;
+  }
+
+  // ── pull requests ─────────────────────────────────────────────────────
+  async createPr(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    fields: { title: string; head: string; base?: string },
+  ): Promise<Result<PullRequestRow, ForgeError>> {
+    const repoRow = this.store.getRepo(owner, repo);
+    if (!repoRow)
+      return Result.err(
+        new ForgeError({ message: "repo not found", code: "not_found" }),
+      );
+    // Opening a PR is a write intent on the repo.
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const base = fields.base ?? repoRow.default_branch;
+    if (fields.head === base)
+      return Result.err(
+        new ForgeError({
+          message: "head and base are the same branch",
+          code: "invalid",
+        }),
+      );
+    for (const ref of [fields.head, base]) {
+      const sha = await this.git.headSha(owner, repo, ref);
+      if (sha.status === "error")
+        return Result.err(
+          new ForgeError({
+            message: `no such branch: ${ref}`,
+            code: "invalid",
+          }),
+        );
+    }
+    const title = fields.title.trim() || `Merge ${fields.head} into ${base}`;
+    return Result.ok(
+      this.store.createPr(owner, repo, {
+        title,
+        headRef: fields.head,
+        baseRef: base,
+        author: actor.username,
+      }),
+    );
+  }
+
+  async mergePr(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+  ): Promise<Result<PullRequestRow, ForgeError>> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const pr = this.store.getPr(owner, repo, number);
+    if (!pr)
+      return Result.err(
+        new ForgeError({
+          message: "pull request not found",
+          code: "not_found",
+        }),
+      );
+    if (pr.state !== "open")
+      return Result.err(
+        new ForgeError({
+          message: `pull request is ${pr.state}`,
+          code: "invalid",
+        }),
+      );
+    const merged = await this.git.mergeBranch(
+      owner,
+      repo,
+      pr.base_ref,
+      pr.head_ref,
+      `Merge pull request #${number}: ${pr.title}`,
+    );
+    if (merged.status === "error")
+      return Result.err(
+        new ForgeError({ message: merged.error.message, code: "invalid" }),
+      );
+    this.store.setPrState(owner, repo, number, "merged");
+    return Result.ok({ ...pr, state: "merged" });
+  }
+
+  closePr(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const pr = this.store.getPr(owner, repo, number);
+    if (!pr)
+      return Result.err(
+        new ForgeError({
+          message: "pull request not found",
+          code: "not_found",
+        }),
+      );
+    this.store.setPrState(owner, repo, number, "closed");
+    return Result.ok(undefined);
   }
 }

@@ -84,6 +84,109 @@ export function apiRouter(
       );
     }
 
+    // ── pull requests ────────────────────────────────────────────────────
+    // POST /api/v1/repos/:o/:n/pulls {title, head, base?}
+    let pm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls$/);
+    if (pm) {
+      const [, owner, repo] = pm as unknown as [string, string, string];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      if (req.method === "GET") {
+        const user = await deps.forge.authenticate(req);
+        if (!user || !deps.forge.authorize(user, owner, repo, "read"))
+          return json({ error: "unauthorized" }, user ? 403 : 401);
+        const state = url.searchParams.get("state") ?? undefined;
+        return json({ pulls: deps.store.listPrs(owner, repo, state) });
+      }
+      if (req.method === "POST") {
+        const user = await deps.forge.authenticate(req);
+        if (!user) return json({ error: "unauthorized" }, 401);
+        const body = (await req.json().catch(() => null)) as {
+          title?: string;
+          head?: string;
+          base?: string;
+        } | null;
+        if (!body?.head) return json({ error: "head branch required" }, 400);
+        const pr = await deps.forge.createPr(user, owner, repo, {
+          title: body.title ?? "",
+          head: body.head,
+          ...(body.base ? { base: body.base } : {}),
+        });
+        if (pr.status === "error")
+          return json(
+            { error: pr.error.message },
+            pr.error.code === "unauthorized" ? 403 : 400,
+          );
+        // Kick so a preview environment comes up for the new PR.
+        void deps.reconciler.kickAll();
+        return json(pr.value, 201);
+      }
+    }
+
+    // GET /api/v1/repos/:o/:n/pulls/:num  (+ diff)
+    pm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
+    if (req.method === "GET" && pm) {
+      const [, owner, repo, num] = pm as unknown as [
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, repo, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const pr = deps.store.getPr(owner, repo, Number(num));
+      if (!pr) return json({ error: "not found" }, 404);
+      const diff = await deps.git.diffStat(
+        owner,
+        repo,
+        pr.base_ref,
+        pr.head_ref,
+      );
+      return json({
+        ...pr,
+        diff: diff.status === "ok" ? diff.value : { files: [], patch: "" },
+      });
+    }
+
+    // POST /api/v1/repos/:o/:n/pulls/:num/{merge,close}
+    pm = path.match(
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/(merge|close)$/,
+    );
+    if (req.method === "POST" && pm) {
+      const [, owner, repo, num, action] = pm as unknown as [
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      if (action === "merge") {
+        const merged = await deps.forge.mergePr(user, owner, repo, Number(num));
+        if (merged.status === "error")
+          return json(
+            { error: merged.error.message },
+            merged.error.code === "unauthorized" ? 403 : 400,
+          );
+        void deps.reconciler.kickAll(); // ship the merge + tear down the preview
+        return json(merged.value);
+      }
+      const closed = deps.forge.closePr(user, owner, repo, Number(num));
+      if (closed.status === "error")
+        return json(
+          { error: closed.error.message },
+          closed.error.code === "unauthorized" ? 403 : 400,
+        );
+      void deps.reconciler.kickAll();
+      return json({ ok: true });
+    }
+
     // GET /api/v1/apps — desired apps (from gitops) overlaid with observed state.
     if (req.method === "GET" && path === "/api/v1/apps") {
       const user = await deps.forge.authenticate(req);
