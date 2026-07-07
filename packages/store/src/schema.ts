@@ -96,4 +96,29 @@ export const MIGRATIONS: readonly string[] = [
     UNIQUE(owner, repo, number)
   );
   `,
+  `
+  CREATE TABLE issues (
+    id         TEXT PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    number     INTEGER NOT NULL,
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL DEFAULT '',
+    state      TEXT NOT NULL DEFAULT 'open',
+    labels     TEXT NOT NULL DEFAULT '',   -- comma-separated
+    author     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(owner, repo, number)
+  );
+  CREATE TABLE issue_comments (
+    id         TEXT PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    number     INTEGER NOT NULL,
+    author     TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX issue_comments_issue ON issue_comments (owner, repo, number, id);
+  `,
 ];

@@ -81,6 +81,29 @@ export interface PullRequestRow {
   created_at: number;
 }
 
+export interface IssueRow {
+  id: string;
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  body: string;
+  state: string;
+  labels: string; // comma-separated
+  author: string;
+  created_at: number;
+}
+
+export interface IssueCommentRow {
+  id: string;
+  owner: string;
+  repo: string;
+  number: number;
+  author: string;
+  body: string;
+  created_at: number;
+}
+
 export class Store {
   readonly db: Database;
 
@@ -481,5 +504,143 @@ export class Store {
       "UPDATE pull_requests SET state = ? WHERE owner = ? AND repo = ? AND number = ?",
       [state, owner, repo, number],
     );
+  }
+
+  // ── issues ────────────────────────────────────────────────────────────
+  createIssue(
+    owner: string,
+    repo: string,
+    fields: { title: string; body: string; author: string; labels: string[] },
+  ): IssueRow {
+    return this.db.transaction(() => {
+      const max =
+        this.db
+          .query<
+            { n: number | null },
+            [string, string]
+          >("SELECT MAX(number) AS n FROM issues WHERE owner = ? AND repo = ?")
+          .get(owner, repo)?.n ?? 0;
+      const row: IssueRow = {
+        id: newId("iss"),
+        owner,
+        repo,
+        number: max + 1,
+        title: fields.title,
+        body: fields.body,
+        state: "open",
+        labels: fields.labels.join(","),
+        author: fields.author,
+        created_at: Date.now(),
+      };
+      this.db.run(
+        `INSERT INTO issues (id, owner, repo, number, title, body, state, labels, author, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.id,
+          owner,
+          repo,
+          row.number,
+          row.title,
+          row.body,
+          row.state,
+          row.labels,
+          row.author,
+          row.created_at,
+        ],
+      );
+      return row;
+    })();
+  }
+
+  getIssue(owner: string, repo: string, number: number): IssueRow | null {
+    return (
+      this.db
+        .query<
+          IssueRow,
+          [string, string, number]
+        >("SELECT * FROM issues WHERE owner = ? AND repo = ? AND number = ?")
+        .get(owner, repo, number) ?? null
+    );
+  }
+
+  listIssues(owner: string, repo: string, state?: string): IssueRow[] {
+    if (state) {
+      return this.db
+        .query<
+          IssueRow,
+          [string, string, string]
+        >("SELECT * FROM issues WHERE owner = ? AND repo = ? AND state = ? ORDER BY number DESC")
+        .all(owner, repo, state);
+    }
+    return this.db
+      .query<
+        IssueRow,
+        [string, string]
+      >("SELECT * FROM issues WHERE owner = ? AND repo = ? ORDER BY number DESC")
+      .all(owner, repo);
+  }
+
+  /** All open issues carrying a given label — the crew dispatcher's work-list. */
+  listIssuesByLabel(label: string): IssueRow[] {
+    return this.db
+      .query<IssueRow, []>("SELECT * FROM issues WHERE state = 'open'")
+      .all()
+      .filter((i) => i.labels.split(",").includes(label));
+  }
+
+  setIssueState(
+    owner: string,
+    repo: string,
+    number: number,
+    state: string,
+  ): void {
+    this.db.run(
+      "UPDATE issues SET state = ? WHERE owner = ? AND repo = ? AND number = ?",
+      [state, owner, repo, number],
+    );
+  }
+
+  setIssueLabels(
+    owner: string,
+    repo: string,
+    number: number,
+    labels: string[],
+  ): void {
+    this.db.run(
+      "UPDATE issues SET labels = ? WHERE owner = ? AND repo = ? AND number = ?",
+      [labels.join(","), owner, repo, number],
+    );
+  }
+
+  addComment(
+    owner: string,
+    repo: string,
+    number: number,
+    author: string,
+    body: string,
+  ): IssueCommentRow {
+    const row: IssueCommentRow = {
+      id: newId("cmt"),
+      owner,
+      repo,
+      number,
+      author,
+      body,
+      created_at: Date.now(),
+    };
+    this.db.run(
+      "INSERT INTO issue_comments (id, owner, repo, number, author, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [row.id, owner, repo, number, author, body, row.created_at],
+    );
+    return row;
+  }
+
+  listComments(owner: string, repo: string, number: number): IssueCommentRow[] {
+    return this.db
+      .query<
+        IssueCommentRow,
+        [string, string, number]
+      >("SELECT * FROM issue_comments WHERE owner = ? AND repo = ? AND number = ? ORDER BY id ASC")
+      .all(owner, repo, number);
   }
 }

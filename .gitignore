@@ -4,3 +4,8 @@ node_modules/
 /tmp/
 *.age
 !**/fixtures/**/*.age
+# Secrets — never commit
+claude-token
+*-token
+.env
+.env.*

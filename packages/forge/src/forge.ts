@@ -6,7 +6,14 @@ import {
   sha256Hex,
 } from "@op/core";
 import type { GitHost } from "@op/git";
-import type { PullRequestRow, RepoRow, Store, UserRow } from "@op/store";
+import type {
+  IssueCommentRow,
+  IssueRow,
+  PullRequestRow,
+  RepoRow,
+  Store,
+  UserRow,
+} from "@op/store";
 import { ForgeError } from "./errors.ts";
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -329,6 +336,95 @@ export class Forge {
         }),
       );
     this.store.setPrState(owner, repo, number, "closed");
+    return Result.ok(undefined);
+  }
+
+  // ── issues ────────────────────────────────────────────────────────────
+  createIssue(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    fields: { title: string; body?: string; labels?: string[] },
+  ): Result<IssueRow, ForgeError> {
+    if (!this.store.getRepo(owner, repo))
+      return Result.err(
+        new ForgeError({ message: "repo not found", code: "not_found" }),
+      );
+    const title = fields.title.trim();
+    if (!title)
+      return Result.err(
+        new ForgeError({ message: "title required", code: "invalid" }),
+      );
+    const labels = (fields.labels ?? [])
+      .map((l) => l.trim().toLowerCase())
+      .filter(Boolean);
+    return Result.ok(
+      this.store.createIssue(owner, repo, {
+        title,
+        body: fields.body ?? "",
+        author: actor.username,
+        labels,
+      }),
+    );
+  }
+
+  /** Label changes are a write intent (they can trigger the crew). */
+  setIssueLabels(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+    labels: string[],
+  ): Result<IssueRow, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const issue = this.store.getIssue(owner, repo, number);
+    if (!issue)
+      return Result.err(
+        new ForgeError({ message: "issue not found", code: "not_found" }),
+      );
+    const clean = labels.map((l) => l.trim().toLowerCase()).filter(Boolean);
+    this.store.setIssueLabels(owner, repo, number, clean);
+    return Result.ok({ ...issue, labels: clean.join(",") });
+  }
+
+  comment(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+    body: string,
+  ): Result<IssueCommentRow, ForgeError> {
+    if (!this.store.getIssue(owner, repo, number))
+      return Result.err(
+        new ForgeError({ message: "issue not found", code: "not_found" }),
+      );
+    if (!body.trim())
+      return Result.err(
+        new ForgeError({ message: "empty comment", code: "invalid" }),
+      );
+    return Result.ok(
+      this.store.addComment(owner, repo, number, actor.username, body),
+    );
+  }
+
+  closeIssue(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    if (!this.store.getIssue(owner, repo, number))
+      return Result.err(
+        new ForgeError({ message: "issue not found", code: "not_found" }),
+      );
+    this.store.setIssueState(owner, repo, number, "closed");
     return Result.ok(undefined);
   }
 }

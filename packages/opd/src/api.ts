@@ -194,6 +194,118 @@ export function apiRouter(
       return json({ ok: true });
     }
 
+    // ── issues ───────────────────────────────────────────────────────────
+    let im = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues$/);
+    if (im) {
+      const [, owner, repo] = im as unknown as [string, string, string];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      if (req.method === "GET") {
+        const user = await deps.forge.authenticate(req);
+        if (!user || !deps.forge.authorize(user, owner, repo, "read"))
+          return json({ error: "unauthorized" }, user ? 403 : 401);
+        const state = url.searchParams.get("state") ?? undefined;
+        return json({ issues: deps.store.listIssues(owner, repo, state) });
+      }
+      if (req.method === "POST") {
+        const user = await deps.forge.authenticate(req);
+        if (!user) return json({ error: "unauthorized" }, 401);
+        const body = (await req.json().catch(() => null)) as {
+          title?: string;
+          body?: string;
+          labels?: string[];
+        } | null;
+        if (!body?.title) return json({ error: "title required" }, 400);
+        const issue = deps.forge.createIssue(user, owner, repo, {
+          title: body.title,
+          ...(body.body ? { body: body.body } : {}),
+          ...(body.labels ? { labels: body.labels } : {}),
+        });
+        if (issue.status === "error")
+          return json(
+            { error: issue.error.message },
+            issue.error.code === "not_found" ? 404 : 400,
+          );
+        void deps.reconciler.kickAll(); // an agent-work issue wakes the crew
+        return json(issue.value, 201);
+      }
+    }
+
+    // GET /api/v1/repos/:o/:n/issues/:num  (+ comments)
+    im = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
+    if (req.method === "GET" && im) {
+      const [, owner, repo, num] = im as unknown as [
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, repo, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const issue = deps.store.getIssue(owner, repo, Number(num));
+      if (!issue) return json({ error: "not found" }, 404);
+      return json({
+        ...issue,
+        comments: deps.store.listComments(owner, repo, Number(num)),
+      });
+    }
+
+    // POST /api/v1/repos/:o/:n/issues/:num/{comments,labels,close}
+    im = path.match(
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/(comments|labels|close)$/,
+    );
+    if (req.method === "POST" && im) {
+      const [, owner, repo, num, action] = im as unknown as [
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const n = Number(num);
+      if (action === "comments") {
+        const body = (await req.json().catch(() => null)) as {
+          body?: string;
+        } | null;
+        const c = deps.forge.comment(user, owner, repo, n, body?.body ?? "");
+        if (c.status === "error") return json({ error: c.error.message }, 400);
+        return json(c.value, 201);
+      }
+      if (action === "labels") {
+        const body = (await req.json().catch(() => null)) as {
+          labels?: string[];
+        } | null;
+        const r = deps.forge.setIssueLabels(
+          user,
+          owner,
+          repo,
+          n,
+          body?.labels ?? [],
+        );
+        if (r.status === "error")
+          return json(
+            { error: r.error.message },
+            r.error.code === "unauthorized" ? 403 : 400,
+          );
+        void deps.reconciler.kickAll(); // labeling agent-work wakes the crew
+        return json(r.value);
+      }
+      const closed = deps.forge.closeIssue(user, owner, repo, n);
+      if (closed.status === "error")
+        return json(
+          { error: closed.error.message },
+          closed.error.code === "unauthorized" ? 403 : 400,
+        );
+      return json({ ok: true });
+    }
+
     // GET /api/v1/apps — desired apps (from gitops) overlaid with observed state.
     if (req.method === "GET" && path === "/api/v1/apps") {
       const user = await deps.forge.authenticate(req);
