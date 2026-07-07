@@ -7,10 +7,38 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Result } from "@op/core";
-import { verifyAllSealed } from "@op/secrets";
+import { openAll, verifyAllSealed, type SecretsFile } from "@op/secrets";
 import { readLineage } from "@op/mitosis";
 import { resolveEngineSocket } from "@op/engine";
-import { Platform, readSecretsFile } from "@op/opd";
+import { Platform, readSecretsFile, SYS } from "@op/opd";
+
+// Every historical version of the daughter's sealed secrets, across ALL refs
+// and history — the surface a public-read repo exposes to a key-compromise
+// harvester. Sovereignty requires the mother's key to open NONE of them.
+async function allHistoricalSecrets(
+  gitopsBare: string,
+): Promise<SecretsFile[]> {
+  const rev = Bun.spawn(["git", "-C", gitopsBare, "rev-list", "--all"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const shas = (await new Response(rev.stdout).text())
+    .split("\n")
+    .filter(Boolean);
+  const out: SecretsFile[] = [];
+  for (const sha of shas) {
+    const show = Bun.spawn(
+      ["git", "-C", gitopsBare, "show", `${sha}:secrets.age.json`],
+      {
+        stdout: "pipe",
+        stderr: "ignore",
+      },
+    );
+    if ((await show.exited) !== 0) continue; // absent in this commit
+    out.push(JSON.parse(await new Response(show.stdout).text()) as SecretsFile);
+  }
+  return out;
+}
 
 const sock = resolveEngineSocket();
 const HARD_TOTAL_MS = Number(process.env["OP_E2E_HARD_MS"] ?? 90_000);
@@ -283,6 +311,22 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
         daughterSecrets,
       );
       expect(motherAttempt.status).toBe("error"); // the negative test that matters
+
+      // HISTORY, not just HEAD: a full-history seed would smuggle the mother's
+      // prior secrets.age.json commits into the daughter's public repo. Prove
+      // the mother key opens NOTHING across the daughter's entire git history.
+      const gitopsBare = join(
+        daughter.sd.reposDir,
+        SYS.owner,
+        `${SYS.name}.git`,
+      );
+      const historical = await allHistoricalSecrets(gitopsBare);
+      expect(historical.length).toBeGreaterThan(0);
+      for (const file of historical) {
+        const opened = await openAll(mother.key.identity, file);
+        expect(opened.status).toBe("error");
+      }
+
       const lineage = await readLineage(daughter.sd.originFile);
       expect(lineage.join("\n")).toContain(
         "d1.localtest.me germinated-from plat.localtest.me",

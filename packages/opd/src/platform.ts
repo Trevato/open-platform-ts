@@ -279,7 +279,12 @@ export class Platform {
         try {
           const tmpRoot = join(work, "state");
           const tmpSd = stateDir(tmpRoot);
-          // Lean gitops copy: clone bare → strip apps/ in a work clone → push back.
+          // Squash gitops to a SINGLE ORPHAN commit with apps/ and
+          // secrets.age.json removed. This is load-bearing for sovereignty:
+          // a bundle of full history would carry the mother's prior
+          // secrets.age.json commits — inert but decryptable by the mother's
+          // key — into every descendant's public repo forever. The daughter
+          // regenerates all secrets at germination, so the seed carries none.
           const gitopsBare = join(
             this.sd.reposDir,
             SYS.owner,
@@ -287,10 +292,13 @@ export class Platform {
           );
           const tmpGitops = join(tmpSd.reposDir, SYS.owner, `${SYS.name}.git`);
           await mkdir(join(tmpSd.reposDir, SYS.owner), { recursive: true });
-          await run(["git", "clone", "-q", "--bare", gitopsBare, tmpGitops]);
           const strip = join(work, "strip");
-          await run(["git", "clone", "-q", tmpGitops, strip]);
+          await run(["git", "clone", "-q", gitopsBare, strip]);
           await rm(join(strip, "apps"), { recursive: true, force: true });
+          await rm(join(strip, SECRETS_PATH), { force: true });
+          // --orphan starts fresh history: the single commit has no parent, so
+          // no earlier tree (and no earlier ciphertext) is reachable.
+          await run(["git", "checkout", "-q", "--orphan", "seed-root"], strip);
           await run(["git", "add", "-A"], strip);
           await run(
             [
@@ -301,13 +309,15 @@ export class Platform {
               "user.name=op",
               "commit",
               "-q",
-              "--allow-empty",
               "-m",
-              "seed: strip apps",
+              "genesis",
             ],
             strip,
           );
-          await run(["git", "push", "-q", "origin", "HEAD:main"], strip);
+          // Push into a brand-new bare so ONLY the orphan commit exists there;
+          // writeSeed's `git bundle --all` then carries exactly one commit.
+          await run(["git", "init", "-q", "--bare", "-b", "main", tmpGitops]);
+          await run(["git", "push", "-q", tmpGitops, "seed-root:main"], strip);
 
           const templateBare = join(
             this.sd.reposDir,
