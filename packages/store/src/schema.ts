@@ -49,4 +49,16 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (owner, app)
   );
   `,
+  `
+  CREATE TABLE deploy_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner      TEXT NOT NULL,
+    app        TEXT NOT NULL,
+    ts         INTEGER NOT NULL,
+    phase      TEXT NOT NULL,
+    message    TEXT,
+    sha        TEXT
+  );
+  CREATE INDEX deploy_events_app ON deploy_events (owner, app, id);
+  `,
 ];

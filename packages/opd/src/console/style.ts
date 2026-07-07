@@ -106,6 +106,16 @@ pre.logs {
 .login button { padding: 10px; }
 .err { color: var(--red); font-size: 13px; margin: 0 0 12px; }
 
+.cols { display: grid; grid-template-columns: 300px 1fr; gap: 28px; align-items: start; }
+@media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+.tl { display: flex; flex-direction: column; }
+.ev { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 9px;
+  padding: 7px 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+.ev:last-child { border-bottom: 0; }
+.ev .ph { font-size: 13px; font-weight: 560; text-transform: capitalize; }
+.ev .evm { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .evt { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
 .tree { font-family: var(--mono); font-size: 13px; line-height: 1.9; }
 .tree .gen { color: var(--muted); }
 .tree .arrow { color: var(--faint); }

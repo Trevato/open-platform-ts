@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { repoPath, type Log, type StateDir } from "@op/core";
+import { dirname, join } from "node:path";
+import { buildLogPath, repoPath, type Log, type StateDir } from "@op/core";
 import { provisionDataDir } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { GitHost } from "@op/git";
@@ -84,8 +84,17 @@ export class Reconciler {
   private async convergeApp(spec: AppSpec): Promise<void> {
     const { store, git, engine, log, domain } = this.deps;
     const key = { owner: spec.owner, app: spec.app };
+    const emit = (
+      phase: string,
+      message: string | null,
+      sha: string | null = null,
+    ) => {
+      store.appendEvent(spec.owner, spec.app, phase, message, sha);
+      log.info(`deploy: ${phase}`, { ...key, ...(message ? { message } : {}) });
+    };
     const fail = (message: string) => {
       log.error("converge failed", { ...key, message });
+      emit("failed", message);
       store.upsertAppStatus({
         ...key,
         state: "error",
@@ -97,7 +106,8 @@ export class Reconciler {
 
     const sha = await git.headSha(spec.repo.owner, spec.repo.name, spec.ref);
     if (sha.status === "error") return fail(`headSha: ${sha.error.message}`);
-    const tag = `op/${spec.owner}-${spec.app}:${sha.value.slice(0, 12)}`;
+    const short = sha.value.slice(0, 12);
+    const tag = `op/${spec.owner}-${spec.app}:${short}`;
     const admitted = admitImageTag(tag, spec);
     if (admitted.status === "error") return fail(admitted.error.reason);
 
@@ -125,6 +135,18 @@ export class Reconciler {
       return;
     }
 
+    // A deploy is starting: reflect it live so the dashboard dot goes amber
+    // and the timeline shows progress while we work.
+    const prev = store.getAppStatus(spec.owner, spec.app);
+    store.upsertAppStatus({
+      ...key,
+      state: "building",
+      image_digest: prev?.image_digest ?? null,
+      container_id: prev?.container_id ?? null,
+      message: null,
+    });
+    emit("queued", `commit ${short}`, short);
+
     // Build from a shallow checkout of the app repo's ref.
     const work = await mkdtemp(join(tmpdir(), "op-build-"));
     try {
@@ -147,13 +169,20 @@ export class Reconciler {
         return fail(`clone: ${await new Response(clone.stderr).text()}`);
       }
 
-      log.info("building", { ...key, tag });
+      emit("building", `image ${tag.split(":")[0]}`, short);
+      // Capture the build output to a per-app log the console can tail.
+      const logFile = buildLogPath(this.deps.sd, spec.owner, spec.app);
+      await mkdir(dirname(logFile), { recursive: true });
+      const buildLines: string[] = [`$ docker build → ${tag}`];
       const built = await engine.buildImage({
         contextDir: join(work, "src"),
         tag,
+        onLine: (line) => buildLines.push(line),
       });
+      await writeFile(logFile, buildLines.join("\n") + "\n").catch(() => {});
       if (built.status === "error")
         return fail(`build: ${built.error.message}`);
+      emit("built", built.value.imageId.slice(0, 19), short);
 
       // Single-writer data plane: stop the old container BEFORE starting the
       // new one. Brief downtime is the honest deploy for stateful apps in M1.
@@ -192,6 +221,11 @@ export class Reconciler {
         ...(dataDir ? { dataDir } : {}),
       });
       if (ran.status === "error") return fail(`run: ${ran.error.message}`);
+      emit(
+        "starting",
+        `container ${ran.value.containerId.slice(0, 12)}`,
+        short,
+      );
 
       store.setHost(
         host,
@@ -207,6 +241,7 @@ export class Reconciler {
         container_id: ran.value.containerId,
         message: null,
       });
+      emit("running", host, short);
       log.info("converged", { ...key, tag, hostPort: ran.value.hostPort });
     } finally {
       await rm(work, { recursive: true, force: true });
@@ -224,6 +259,7 @@ export class Reconciler {
       log.info("pruning", { owner: c.owner, app: c.app });
       await engine.stopAndRemove(c.id);
       store.deleteHostsFor(c.owner, c.app);
+      store.appendEvent(c.owner, c.app, "stopped", "app removed", null);
     }
   }
 }

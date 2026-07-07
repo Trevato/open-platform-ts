@@ -128,6 +128,9 @@ export class Engine {
   async buildImage(opts: {
     contextDir: string;
     tag: string;
+    // Fires per build-progress line (the `stream` field) so callers can
+    // surface a live build log. Never throws into the build.
+    onLine?: (line: string) => void;
   }): Promise<Result<{ imageId: string }, EngineError>> {
     const op = "buildImage";
     const tar = await Result.tryPromise({
@@ -174,6 +177,7 @@ export class Engine {
       const trimmed = line.trim();
       if (!trimmed) continue;
       let evt: {
+        stream?: string;
         errorDetail?: { message?: string };
         error?: string;
         aux?: { ID?: string };
@@ -182,6 +186,10 @@ export class Engine {
         evt = JSON.parse(trimmed);
       } catch {
         continue;
+      }
+      if (opts.onLine && typeof evt.stream === "string") {
+        const s = evt.stream.replace(/\n+$/, "");
+        if (s) opts.onLine(s);
       }
       if (evt.errorDetail || evt.error) {
         return Result.err(

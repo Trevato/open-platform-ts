@@ -189,8 +189,18 @@ ${
     : ""
 }
 
-<div class="mt"><div class="row between mb"><span class="label">Logs</span><span class="mut" style="font-size:12px" id="logts"></span></div>
-<pre class="logs" id="logs">loading…</pre></div>`;
+<div class="mt cols">
+  <section>
+    <div class="row between mb"><span class="label">Deploy timeline</span></div>
+    <div class="tl" id="tl"><div class="mut" style="font-size:13px">loading…</div></div>
+  </section>
+  <section>
+    <div class="row between mb"><span class="label">Build log</span></div>
+    <pre class="logs" id="build">—</pre>
+    <div class="row between mb mt"><span class="label">Runtime logs</span><span class="mut" style="font-size:12px" id="logts"></span></div>
+    <pre class="logs" id="logs">loading…</pre>
+  </section>
+</div>`;
 
       return page(
         app,
@@ -198,12 +208,27 @@ ${
         body,
         `
 var KEY=${JSON.stringify(`${owner}/${app}`)};
+var PHASES={queued:1,cloning:1,building:1,built:1,starting:1,running:1,failed:1,stopped:1};
+function ago(ts){var s=Math.max(0,Math.round((Date.now()-ts)/1000));if(s<60)return s+'s ago';var m=Math.round(s/60);if(m<60)return m+'m ago';return Math.round(m/60)+'h ago';}
+function dotFor(p){if(p==='running')return 'running';if(p==='failed')return 'error';if(p==='stopped')return '';if(p==='built')return 'running';return 'building';}
 async function tick(){
   try{
     var r=await fetch('/api/v1/apps/'+KEY);
     if(r.ok){var a=await r.json();document.getElementById('dot').className='dot '+a.state;document.getElementById('state').textContent=a.state;}
+    var ev=await fetch('/api/v1/apps/'+KEY+'/events');
+    if(ev.ok){var j=await ev.json();var el=document.getElementById('tl');
+      if(!j.events.length){el.innerHTML='<div class="mut" style="font-size:13px">No deploys yet.</div>';}
+      else{el.innerHTML=j.events.map(function(e){
+        return '<div class="ev"><span class="dot '+dotFor(e.phase)+'"></span>'+
+          '<span class="ph">'+e.phase+'</span>'+
+          '<span class="evm mono">'+(e.message?String(e.message).replace(/[<>&]/g,''):'')+'</span>'+
+          '<span class="evt">'+ago(e.ts)+'</span></div>';
+      }).join('');}
+    }
+    var bl=await fetch('/api/v1/apps/'+KEY+'/buildlog');
+    if(bl.ok){var b=document.getElementById('build');var bt=await bl.text();b.textContent=bt;}
     var lg=await fetch('/api/v1/apps/'+KEY+'/logs');
-    if(lg.ok){var t=await lg.text();var el=document.getElementById('logs');var atBottom=el.scrollTop+el.clientHeight>=el.scrollHeight-8;el.textContent=t||'(no output yet)';if(atBottom)el.scrollTop=el.scrollHeight;document.getElementById('logts').textContent=new Date().toLocaleTimeString();}
+    if(lg.ok){var t=await lg.text();var lel=document.getElementById('logs');var atBottom=lel.scrollTop+lel.clientHeight>=lel.scrollHeight-8;lel.textContent=t||'(no output yet)';if(atBottom)lel.scrollTop=lel.scrollHeight;document.getElementById('logts').textContent=new Date().toLocaleTimeString();}
   }catch(_){}
 }
 async function snap(){
@@ -211,7 +236,7 @@ async function snap(){
   var j=await r.json().catch(function(){return{}});
   toast(r.ok?('snapshot '+j.id):(j.error||'snapshot failed'));
 }
-tick();setInterval(tick,2000);`,
+tick();setInterval(tick,1500);`,
       );
     }
 

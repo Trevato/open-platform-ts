@@ -1,5 +1,5 @@
 import type { Log, StateDir } from "@op/core";
-import { isValidName } from "@op/core";
+import { buildLogPath, isValidName } from "@op/core";
 import { listSnapshots, snapshot } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { Forge } from "@op/forge";
@@ -105,8 +105,43 @@ export function apiRouter(
       return json({ apps });
     }
 
+    // GET /api/v1/apps/:owner/:app/events — the deploy timeline (newest first).
+    let m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)\/events$/);
+    if (req.method === "GET" && m) {
+      const [, owner, app] = m as unknown as [string, string, string];
+      if (!isValidName(owner) || !isValidName(app))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, app, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const events = deps.store.listEvents(owner, app).map((e) => ({
+        ts: e.ts,
+        phase: e.phase,
+        message: e.message,
+        sha: e.sha,
+      }));
+      return json({ events });
+    }
+
+    // GET /api/v1/apps/:owner/:app/buildlog — the last build's output.
+    m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)\/buildlog$/);
+    if (req.method === "GET" && m) {
+      const [, owner, app] = m as unknown as [string, string, string];
+      if (!isValidName(owner) || !isValidName(app))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, app, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const file = Bun.file(buildLogPath(deps.sd, owner, app));
+      const text = (await file.exists()) ? await file.text() : "(no build yet)";
+      return new Response(text, {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+
     // GET /api/v1/apps/:owner/:app/logs — tail the running container.
-    let m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)\/logs$/);
+    m = path.match(/^\/api\/v1\/apps\/([^/]+)\/([^/]+)\/logs$/);
     if (req.method === "GET" && m) {
       const [, owner, app] = m as unknown as [string, string, string];
       if (!isValidName(owner) || !isValidName(app))

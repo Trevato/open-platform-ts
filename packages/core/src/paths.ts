@@ -39,3 +39,11 @@ export function appDataDir(sd: StateDir, owner: string, app: string): string {
     panic(`invalid app path: ${owner}/${app}`);
   return join(sd.appdataDir, owner, app);
 }
+
+// Platform-owned build logs, kept OUT of the app's data dir (that dir is the
+// tenant's, snapshotted and seedable; build logs are the platform's).
+export function buildLogPath(sd: StateDir, owner: string, app: string): string {
+  if (!isValidName(owner) || !isValidName(app))
+    panic(`invalid build-log path: ${owner}/${app}`);
+  return join(sd.root, "buildlogs", `${owner}__${app}.log`);
+}

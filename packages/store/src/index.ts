@@ -38,6 +38,16 @@ export interface AppStatusRow {
   updated_at: number;
 }
 
+export interface DeployEventRow {
+  id: number;
+  owner: string;
+  app: string;
+  ts: number;
+  phase: string;
+  message: string | null;
+  sha: string | null;
+}
+
 export class Store {
   readonly db: Database;
 
@@ -251,5 +261,34 @@ export class Store {
         >("SELECT * FROM app_status WHERE owner = ? AND app = ?")
         .get(owner, app) ?? null
     );
+  }
+
+  // ── deploy events (the ship timeline) ─────────────────────────────────
+  appendEvent(
+    owner: string,
+    app: string,
+    phase: string,
+    message: string | null,
+    sha: string | null,
+  ): void {
+    this.db.run(
+      "INSERT INTO deploy_events (owner, app, ts, phase, message, sha) VALUES (?, ?, ?, ?, ?, ?)",
+      [owner, app, Date.now(), phase, message, sha],
+    );
+    // Bounded history: keep the most recent 60 events per app.
+    this.db.run(
+      `DELETE FROM deploy_events WHERE owner = ? AND app = ? AND id NOT IN (
+         SELECT id FROM deploy_events WHERE owner = ? AND app = ? ORDER BY id DESC LIMIT 60)`,
+      [owner, app, owner, app],
+    );
+  }
+
+  listEvents(owner: string, app: string, limit = 40): DeployEventRow[] {
+    return this.db
+      .query<
+        DeployEventRow,
+        [string, string, number]
+      >("SELECT * FROM deploy_events WHERE owner = ? AND app = ? ORDER BY id DESC LIMIT ?")
+      .all(owner, app, limit);
   }
 }

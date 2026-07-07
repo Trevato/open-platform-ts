@@ -64,6 +64,20 @@ describe("Store", () => {
     s.close();
   });
 
+  test("deploy events: newest-first + bounded to 60", () => {
+    const s = freshStore();
+    for (let i = 0; i < 70; i++)
+      s.appendEvent("ada", "hello", "building", `step ${i}`, "abc");
+    const events = s.listEvents("ada", "hello", 100);
+    expect(events.length).toBe(60); // oldest 10 pruned
+    expect(events[0]!.message).toBe("step 69"); // newest first
+    expect(events[59]!.message).toBe("step 10");
+    // isolation between apps
+    s.appendEvent("bob", "other", "running", "x", null);
+    expect(s.listEvents("bob", "other").length).toBe(1);
+    s.close();
+  });
+
   test("host table upsert + resolve", () => {
     const s = freshStore();
     s.setHost("hello-ada.plat.localtest.me", "ada", "hello", "c1", 3000);

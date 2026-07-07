@@ -269,6 +269,19 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
       expect(((await snap.json()) as { id: string }).id).toBeString();
     });
 
+    // 6b. the deploy timeline recorded the ship (queued→building→built→running).
+    await phase("mother: deploy events", 1_000, async () => {
+      const res = await fetch(`${motherApi}/api/v1/apps/ada/hello/events`, {
+        tls: { ca: mother.caCertPem },
+        headers: { authorization: `Basic ${btoa(ada.auth)}` },
+      });
+      expect(res.status).toBe(200);
+      const { events } = (await res.json()) as { events: { phase: string }[] };
+      const phases = new Set(events.map((e) => e.phase));
+      for (const p of ["queued", "building", "built", "running"])
+        expect(phases).toContain(p);
+    });
+
     // 7. seed — the genome, no key inside.
     const seedFile = join(base, "seed.tar.gz");
     await phase("mother: seed", 4_000, async () =>
