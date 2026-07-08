@@ -1,12 +1,15 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { Result, TaggedError, type Log } from "@op/core";
 
 // The "curating not building" composer: a fast model turns a rough one-line
 // idea into a well-formed issue the human edits — a draft of the real object,
-// not a chat reply. Runs through the `claude` CLI (the OAuth token only works
-// there, never the raw Messages API) with a cheap model and NO tools — a pure
-// text→JSON transform, so no sandbox is needed. Degrades to a plain issue.
+// not a chat reply. Runs in-process through the Claude Agent SDK (the OAuth
+// token only works via the SDK/CLI, never the raw Messages API) with a fast
+// model, NO tools, thinking disabled, and grammar-constrained JSON output. It
+// never throws and never fabricates a bad issue — a failure degrades to the
+// editable draft form in the console.
 
 export class ComposerError extends TaggedError("ComposerError")<{
   message: string;
@@ -19,37 +22,78 @@ export interface IssueDraft {
   acceptanceChecks: string[];
 }
 
-// Read at call time (not module load) so tests can override the binary.
-const claudeBin = () => process.env["OP_CLAUDE_BIN"] ?? "claude";
 const MODEL = process.env["OP_COMPOSER_MODEL"] ?? "claude-haiku-4-5";
 
 const SYSTEM = `You are the platform's issue composer. Turn a rough one-line idea into a crisp issue for a caged AI builder that implements it end to end in a single-file Bun + bun:sqlite app served over OIDC.
 
-Emit an imperative title (<=60 chars); a 2-4 sentence body describing what to build; labels (always include "agent-work"); and 3-6 acceptance checks an adversary reviewer can verify over HTTP. ALWAYS fold the safety contract into the body: parameterized SQL only, escape user-controlled text, auth-gate every data path, keep the OIDC login and JSON-for-machines/HTML-for-browsers contract working, and idempotent migrations (preview runs on cloned prod data).
+Emit an imperative title (<=60 chars); a 2-4 sentence body describing what to build; labels (always include "agent-work"); and 3-6 acceptance checks an adversary reviewer can verify over HTTP. ALWAYS fold the safety contract into the body: parameterized SQL only, escape user-controlled text, auth-gate every data path, keep the OIDC login and JSON-for-machines/HTML-for-browsers contract working, and idempotent migrations (preview runs on cloned prod data).`;
 
-Respond with ONLY a JSON object: {"title": string, "body": string, "labels": string[], "acceptanceChecks": string[]}. No prose, no markdown fences.`;
+// Grammar-constrained output — the SDK forces a synthetic tool matching this
+// schema, so the result's `structured_output` is already a conformant object.
+const SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "body", "labels", "acceptanceChecks"],
+  properties: {
+    title: { type: "string" },
+    body: { type: "string" },
+    labels: { type: "array", items: { type: "string" } },
+    acceptanceChecks: { type: "array", items: { type: "string" } },
+  },
+} as const;
 
-// Parse the model's text into the strict shape, tolerating markdown fences and
-// stray prose by extracting the outermost JSON object.
-function parseDraft(text: string, idea: string): IssueDraft {
+// The seam: tests inject a fake query() that yields scripted SDK messages.
+export type RunQuery = typeof query;
+
+// Clamp the model output to the schema AND the business rules — schema
+// guarantees shape, this guarantees policy. Never throws; garbage degrades to a
+// usable draft keyed on the raw idea.
+function clamp(raw: unknown, idea: string): IssueDraft {
+  try {
+    const obj =
+      raw && typeof raw === "object"
+        ? (raw as Record<string, unknown>)
+        : typeof raw === "string"
+          ? extractObject(raw)
+          : {};
+    const labels = Array.isArray(obj["labels"])
+      ? (obj["labels"] as unknown[]).map(String)
+      : [];
+    if (!labels.includes("agent-work")) labels.unshift("agent-work");
+    return {
+      title: String(obj["title"] ?? idea).slice(0, 80),
+      body: String(obj["body"] ?? idea),
+      labels: [...new Set(labels)].slice(0, 6),
+      acceptanceChecks: Array.isArray(obj["acceptanceChecks"])
+        ? (obj["acceptanceChecks"] as unknown[]).map(String).slice(0, 8)
+        : [],
+    };
+  } catch {
+    return {
+      title: idea,
+      body: idea,
+      labels: ["agent-work"],
+      acceptanceChecks: [],
+    };
+  }
+}
+
+// Fallback for a text (non-structured) result: extract the outermost JSON.
+function extractObject(text: string): Record<string, unknown> {
   const s = text.indexOf("{");
   const e = text.lastIndexOf("}");
-  const obj =
-    s >= 0 && e > s
-      ? (JSON.parse(text.slice(s, e + 1)) as Record<string, unknown>)
-      : {};
-  const labels = Array.isArray(obj["labels"])
-    ? (obj["labels"] as unknown[]).map(String)
-    : [];
-  if (!labels.includes("agent-work")) labels.unshift("agent-work");
-  return {
-    title: String(obj["title"] ?? idea).slice(0, 80),
-    body: String(obj["body"] ?? idea),
-    labels: [...new Set(labels)].slice(0, 6),
-    acceptanceChecks: Array.isArray(obj["acceptanceChecks"])
-      ? (obj["acceptanceChecks"] as unknown[]).map(String).slice(0, 8)
-      : [],
-  };
+  return s >= 0 && e > s
+    ? (JSON.parse(text.slice(s, e + 1)) as Record<string, unknown>)
+    : {};
+}
+
+function userPrompt(idea: string, context?: string): string {
+  return (
+    (context
+      ? `The app's current server.ts (match its routes/helpers):\n\`\`\`\n${context.slice(0, 6000)}\n\`\`\`\n\n`
+      : "") +
+    `Rough idea: "${idea}"\n\nCompose the issue as the structured object.`
+  );
 }
 
 export async function draftIssue(opts: {
@@ -58,72 +102,117 @@ export async function draftIssue(opts: {
   oauthToken: string;
   log: Log;
   deadlineMs?: number;
+  runQuery?: RunQuery; // test seam
+  fetchImpl?: typeof fetch; // test seam for the raw-API fast path
 }): Promise<Result<IssueDraft, ComposerError>> {
   const idea = opts.idea.trim().slice(0, 500);
   if (!idea) return Result.err(new ComposerError({ message: "empty idea" }));
 
-  const prompt =
-    (opts.context
-      ? `The app's current server.ts (match its routes/helpers):\n\`\`\`\n${opts.context.slice(0, 6000)}\n\`\`\`\n\n`
-      : "") + `Rough idea: "${idea}"\n\nReturn ONLY the JSON object.`;
+  // Fast lane: a REAL api key (not the oat token) skips the whole SDK subprocess
+  // + cached-prompt tax — the raw Messages API with grammar-constrained output
+  // returns in ~1-3s. The oat token can't use this (the API rejects it).
+  const apiKey = process.env["ANTHROPIC_API_KEY"];
+  if (apiKey && apiKey.startsWith("sk-ant-api"))
+    return draftViaApi(
+      idea,
+      apiKey,
+      opts.context,
+      opts.deadlineMs ?? 20_000,
+      opts.fetchImpl ?? fetch,
+    );
 
-  const proc = Bun.spawn(
-    [
-      claudeBin(),
-      "-p",
-      prompt,
-      "--append-system-prompt",
-      SYSTEM,
-      "--model",
-      MODEL,
-      "--output-format",
-      "json",
-      "--disallowedTools",
-      "Bash Read Write Edit Glob Grep WebFetch Task",
-      "--setting-sources",
-      "",
-    ],
-    {
-      // Hermetic env — never the full process.env (agents can read their env).
-      env: {
-        PATH: process.env["PATH"] ?? "",
-        HOME: process.env["HOME"] ?? "/tmp",
-        LANG: process.env["LANG"] ?? "C.UTF-8",
-        CLAUDE_CODE_OAUTH_TOKEN: opts.oauthToken,
-        // Isolate config from the operator's ~/.claude (avoids lock contention).
-        CLAUDE_CONFIG_DIR: join(homedir(), ".op-composer-cfg"),
-      },
-      // Close stdin: with an open stdin pipe, `claude -p` waits for input and
-      // never exits — the composer would hang until the deadline. This is THE
-      // reliability fix.
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  const run = opts.runQuery ?? query;
+  const prompt = userPrompt(idea, opts.context);
 
-  // Haiku-via-CLI latency is variable (~5-25s). A generous deadline lets slow
-  // calls finish behind the skeleton; the console degrades gracefully past it.
-  const timer = setTimeout(() => proc.kill(), opts.deadlineMs ?? 35_000);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), opts.deadlineMs ?? 20_000);
   try {
-    // Drain stdout/stderr CONCURRENTLY with waiting for exit — reading only
-    // after exit can deadlock if the child fills the pipe buffer.
-    const stdoutP = new Response(proc.stdout).text();
-    const stderrP = new Response(proc.stderr).text();
-    const code = await proc.exited;
-    const [out, err] = await Promise.all([stdoutP, stderrP]);
-    if (code !== 0)
-      return Result.err(
-        new ComposerError({
-          message: `composer exited ${code}: ${err.slice(0, 200)}`,
-        }),
-      );
-    const wrap = JSON.parse(out) as { result?: string; is_error?: boolean };
-    if (wrap.is_error || !wrap.result)
+    const q = run({
+      prompt,
+      options: {
+        model: MODEL,
+        systemPrompt: SYSTEM,
+        allowedTools: [],
+        maxTurns: 4, // the structured-output tool call + finalize
+        permissionMode: "bypassPermissions",
+        settingSources: [], // skip ~/.claude — a real latency tax
+        thinking: { type: "disabled" }, // the biggest latency win
+        outputFormat: { type: "json_schema", schema: SCHEMA },
+        strictMcpConfig: true,
+        abortController: abort,
+        // The oat token authenticates via the SDK's subprocess; blank the API
+        // key so it resolves OAuth, isolate config from the operator's ~/.claude.
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          HOME: process.env["HOME"] ?? "/tmp",
+          LANG: process.env["LANG"] ?? "C.UTF-8",
+          ANTHROPIC_API_KEY: "",
+          CLAUDE_CODE_OAUTH_TOKEN: opts.oauthToken,
+          CLAUDE_CONFIG_DIR: join(homedir(), ".op-composer-cfg"),
+        },
+      },
+    } as Parameters<typeof query>[0]);
+
+    let structured: unknown = null;
+    let resultText = "";
+    let errored = false;
+    for await (const m of q) {
+      if (m.type === "result") {
+        errored = m.subtype !== "success";
+        structured =
+          (m as { structured_output?: unknown }).structured_output ?? null;
+        resultText =
+          "result" in m ? String((m as { result?: unknown }).result ?? "") : "";
+      }
+    }
+    if (errored && structured == null && !resultText)
       return Result.err(
         new ComposerError({ message: "composer returned no result" }),
       );
-    return Result.ok(parseDraft(wrap.result, idea));
+    return Result.ok(clamp(structured ?? resultText, idea));
+  } catch (cause) {
+    return Result.err(new ComposerError({ message: String(cause) }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The raw Messages API fast lane — used only when a real ANTHROPIC_API_KEY is
+// configured (the oat token is rejected here). Grammar-constrained output
+// (output_config.format) returns valid JSON in ~1-3s with no subprocess.
+async function draftViaApi(
+  idea: string,
+  apiKey: string,
+  context: string | undefined,
+  deadlineMs: number,
+  fetchImpl: typeof fetch,
+): Promise<Result<IssueDraft, ComposerError>> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), deadlineMs);
+  try {
+    const res = await fetchImpl("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: abort.signal,
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 1024,
+        system: SYSTEM,
+        messages: [{ role: "user", content: userPrompt(idea, context) }],
+        output_config: { format: { type: "json_schema", schema: SCHEMA } },
+      }),
+    });
+    if (!res.ok)
+      return Result.err(
+        new ComposerError({ message: `messages api ${res.status}` }),
+      );
+    const body = (await res.json()) as { content?: Array<{ text?: string }> };
+    const text = body.content?.[0]?.text ?? "";
+    return Result.ok(clamp(text, idea));
   } catch (cause) {
     return Result.err(new ComposerError({ message: String(cause) }));
   } finally {
