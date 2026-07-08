@@ -157,7 +157,10 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
     // Everything below is the authenticated console. Non-console paths return
     // null so the forge/API routers get their turn.
     const isConsolePath =
-      path === "/" || path === "/lineage" || path.startsWith("/apps/");
+      path === "/" ||
+      path === "/lineage" ||
+      path === "/crew" ||
+      path.startsWith("/apps/");
     if (!isConsolePath) return null;
 
     const user = await deps.forge.authenticate(req);
@@ -628,6 +631,40 @@ async function addComment(e){e.preventDefault();var i=document.getElementById('c
   var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/comments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({body:b})});
   if(r.ok){i.value='';refresh();}else toast('failed');return false;}
 refresh();setInterval(refresh,2000);`,
+      );
+    }
+
+    // ── crew queue ───────────────────────────────────────────────────────
+    if (path === "/crew") {
+      const body = `
+<h1>Crew</h1>
+<p class="sub">What the build crew is working on across every app. Issues that need a human are listed first.</p>
+<div id="queue"><div class="mut">loading…</div></div>`;
+      return page(
+        "Crew",
+        chrome("crew", [{ label: "Crew" }]),
+        body,
+        `
+function crewRow(it){
+  var blocked=it.phase==='needs review'||it.phase==='failed';
+  var pc=blocked?'fail':(it.phase==='reviewing'?'reviewing':it.phase==='queued'?'':'building');
+  var dot=blocked?'error':(it.phase==='queued'?'pending':'building');
+  return '<a class="list-row" href="/apps/'+it.owner+'/'+it.repo+'/issues/'+it.number+'">'+
+    '<span class="num"><span class="dot '+dot+'" style="margin-right:7px"></span>'+escHtml(it.owner+'/'+it.repo+' #'+it.number)+'</span>'+
+    '<span class="ttl">'+escHtml(it.title)+'</span>'+
+    '<span class="meta"><span class="pill '+pc+'">'+escHtml(it.phase)+'</span></span></a>';
+}
+async function tick(){
+  if(document.hidden) return;
+  try{
+    var r=await fetch('/api/v1/crew'); if(!r.ok) return;
+    var d=await r.json(); var el=document.getElementById('queue');
+    if(!d.items.length){el.innerHTML='<div class="empty">The crew is idle — nothing in flight.<br><span class="mut" style="font-size:13px">Open an app and describe a feature to put it to work.</span></div>';return;}
+    var head='<p class="sub" style="margin:-8px 0 16px">'+(d.blocked?('<b style="color:var(--red)">'+d.blocked+' need'+(d.blocked>1?'':'s')+' review</b> · '):'')+(d.working||'0')+' in progress</p>';
+    el.innerHTML=head+'<div class="rows">'+d.items.map(crewRow).join('')+'</div>';
+  }catch(_){}
+}
+tick();setInterval(tick,2000);`,
       );
     }
 

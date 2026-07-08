@@ -31,7 +31,7 @@ export interface Crumb {
 export interface Chrome {
   domain: string;
   user: string;
-  active: "apps" | "lineage" | "";
+  active: "apps" | "lineage" | "crew" | "";
   /** Breadcrumb trail below the header; last entry is the current page. */
   crumbs?: Crumb[];
 }
@@ -107,8 +107,8 @@ export function page(
   <div class="bar">
     <a class="brand" href="/"><span class="seed"></span>Open Platform <span class="dom">${esc(chrome.domain)}</span></a>
     <span class="spacer"></span>
-    <nav>${nav("/", "Apps", "apps")}${nav("/lineage", "Lineage", "lineage")}</nav>
-    <a class="crew" id="crewpill" href="/"><span class="dot"></span>crew idle</a>
+    <nav>${nav("/", "Apps", "apps")}${nav("/crew", "Crew", "crew")}${nav("/lineage", "Lineage", "lineage")}</nav>
+    <a class="crew" id="crewpill" href="/crew"><span class="dot"></span>crew idle</a>
     <span class="tmc" id="tmc" role="group" aria-label="Theme">${themeBtn("light", "☀", "Light")}${themeBtn("dim", "◑", "Dim")}${themeBtn("dark", "☾", "Dark")}</span>
     <span class="who">${esc(chrome.user)}</span>
     <form method="post" action="/logout" style="margin:0"><button class="ghost sm" data-tip="Sign out">⏻</button></form>

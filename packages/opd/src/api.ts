@@ -345,19 +345,36 @@ export function apiRouter(
       return json({ ok: true });
     }
 
-    // GET /api/v1/crew — a cheap rollup for the header status pill: how many
-    // issues the crew is actively building/reviewing, and how many are blocked
-    // on a human after a failed review.
+    // GET /api/v1/crew — the crew's cross-app queue: what's actively building/
+    // reviewing/reworking/queued, and what's blocked on a human. Feeds the
+    // header pill (counts) and the /crew page (items).
     if (req.method === "GET" && path === "/api/v1/crew") {
       const user = await deps.forge.authenticate(req);
       if (!user) return json({ error: "unauthorized" }, 401);
-      const working =
-        deps.store.listIssuesByLabel("agent-building").length +
-        deps.store.listIssuesByLabel("agent-reviewing").length;
-      const blocked = deps.store.listIssuesByLabel(
-        "agent-review-failed",
-      ).length;
-      return json({ working, blocked });
+      const byLabel = (label: string, phase: string) =>
+        deps.store.listIssuesByLabel(label).map((i) => ({
+          owner: i.owner,
+          repo: i.repo,
+          number: i.number,
+          title: i.title,
+          phase,
+        }));
+      const blocked = [
+        ...byLabel("agent-review-failed", "needs review"),
+        ...byLabel("agent-failed", "failed"),
+      ];
+      const working = [
+        ...byLabel("agent-building", "building"),
+        ...byLabel("agent-reworking", "reworking"),
+        ...byLabel("agent-reviewing", "reviewing"),
+        ...byLabel("agent-work", "queued"),
+      ];
+      // Blocked first (needs attention), then in-progress.
+      return json({
+        working: working.length,
+        blocked: blocked.length,
+        items: [...blocked, ...working],
+      });
     }
 
     // GET /api/v1/apps — desired apps (from gitops) overlaid with observed state.
