@@ -59,6 +59,31 @@ async function makeWritable(dir: string): Promise<void> {
   await p.exited;
 }
 
+// Platform-config allowlist (authored by the crew, plat/opd#1): the caged agent
+// editing plat/platform may only change crew role prompts/skills or platform.json.
+function isAllowedPlatformConfigPath(path: string): boolean {
+  if (path === "platform.json") return true;
+  return path.startsWith("crew/") && path.endsWith(".md");
+}
+
+async function changedPaths(checkout: string): Promise<string[]> {
+  const p = Bun.spawn(
+    [
+      "git",
+      "-c",
+      "safe.directory=*",
+      "-C",
+      checkout,
+      "diff",
+      "--name-only",
+      "origin/main..HEAD",
+    ],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const out = (await new Response(p.stdout).text()).trim();
+  return out ? out.split("\n") : [];
+}
+
 async function revParse(checkout: string): Promise<string> {
   const p = Bun.spawn(
     ["git", "-c", "safe.directory=*", "-C", checkout, "rev-parse", "HEAD"],
@@ -215,6 +240,18 @@ export async function runBuilder(
             "-m",
             `agent: ${issue.title}`,
           ]);
+        }
+
+        // Guardrail (authored by the crew, issue plat/opd#1): when building the
+        // platform CONFIG repo itself, the caged agent may only touch crew
+        // prompts/skills and platform.json — never arbitrary files.
+        if (issue.owner === "plat" && issue.repo === "platform") {
+          for (const path of await changedPaths(checkout)) {
+            if (!isAllowedPlatformConfigPath(path))
+              throw new Error(
+                `edit outside the allowlist: ${path} (platform config allows only crew/**/*.md and platform.json)`,
+              );
+          }
         }
 
         // The agent changed nothing ⇒ fail loudly rather than push an empty

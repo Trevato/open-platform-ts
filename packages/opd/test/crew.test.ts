@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLog, Result, stateDir } from "@op/core";
@@ -163,6 +163,70 @@ describe("builder", () => {
     const built = await runBuilder(builderDeps(h, noop, h.admin), issue);
     expect(built.status).toBe("error");
     expect(h.store.getPr("plat", "app", 1)).toBeNull();
+  });
+
+  // Authored by the crew itself (plat/opd#1) — the editable-path allowlist.
+  test("plat/platform: rejects an edit outside the crew/**/*.md + platform.json allowlist", async () => {
+    const h = await harness();
+    const seed = await mkdtemp(join(tmpdir(), "op-crew-seed-"));
+    dirs.push(seed);
+    await writeFile(join(seed, "platform.json"), "{}\n");
+    Result.unwrap(await h.forge.createRepo(h.admin, "plat", "platform"));
+    Result.unwrap(
+      await h.git.seedRepoFromDir("plat", "platform", seed, "init"),
+    );
+    const sneakyAgent: RunAgent = async (run) => {
+      await writeFile(join(run.cwd, "server.ts"), "// oops\n");
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    };
+    const issue = h.store.createIssue("plat", "platform", {
+      title: "sneak in a source edit",
+      body: "",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    const built = await runBuilder(builderDeps(h, sneakyAgent, h.admin), issue);
+    expect(built.status).toBe("error");
+    if (built.status === "error")
+      expect(built.error.message).toContain(
+        "edit outside the allowlist: server.ts",
+      );
+    expect(h.store.getPr("plat", "platform", 1)).toBeNull();
+  });
+
+  test("plat/platform: allows crew/**/*.md and platform.json edits", async () => {
+    const h = await harness();
+    const seed = await mkdtemp(join(tmpdir(), "op-crew-seed-"));
+    dirs.push(seed);
+    await writeFile(join(seed, "platform.json"), "{}\n");
+    Result.unwrap(await h.forge.createRepo(h.admin, "plat", "platform"));
+    Result.unwrap(
+      await h.git.seedRepoFromDir("plat", "platform", seed, "init"),
+    );
+    const configAgent: RunAgent = async (run) => {
+      await mkdir(join(run.cwd, "crew"), { recursive: true });
+      await writeFile(join(run.cwd, "crew", "builder.md"), "updated prompt\n");
+      await writeFile(join(run.cwd, "platform.json"), '{"ok":true}\n');
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    };
+    const issue = h.store.createIssue("plat", "platform", {
+      title: "tweak the builder prompt",
+      body: "",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    const built = await runBuilder(builderDeps(h, configAgent, h.admin), issue);
+    expect(built.status).toBe("ok");
   });
 });
 
@@ -487,7 +551,11 @@ describe("dispatcher", () => {
           numTurns: 1,
         });
       }
-      await writeFile(join(run.cwd, "TWEAK.md"), "prompt tweak\n");
+      await mkdir(join(run.cwd, "crew", "builder"), { recursive: true });
+      await writeFile(
+        join(run.cwd, "crew", "builder", "instructions.md"),
+        "prompt tweak\n",
+      );
       return Result.ok({
         ok: true,
         result: "done",
