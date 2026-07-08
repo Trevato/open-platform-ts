@@ -22,6 +22,13 @@ export interface IssueDraft {
   acceptanceChecks: string[];
 }
 
+// Live progress the console renders so the UI reflects the model's real state
+// (thinking → drafting) instead of freezing on a skeleton.
+export interface ComposerEvent {
+  phase: "thinking" | "drafting";
+  text?: string; // streamed reasoning, on `thinking`
+}
+
 const MODEL = process.env["OP_COMPOSER_MODEL"] ?? "claude-haiku-4-5";
 
 const SYSTEM = `You are the platform's issue composer. Turn a rough one-line idea into a crisp issue for a caged AI builder that implements it end to end in a single-file Bun + bun:sqlite app served over OIDC.
@@ -104,6 +111,8 @@ export async function draftIssue(opts: {
   deadlineMs?: number;
   runQuery?: RunQuery; // test seam
   fetchImpl?: typeof fetch; // test seam for the raw-API fast path
+  /** Live progress for a responsive UI: the model's phase + streamed reasoning. */
+  onEvent?: (ev: ComposerEvent) => void;
 }): Promise<Result<IssueDraft, ComposerError>> {
   const idea = opts.idea.trim().slice(0, 500);
   if (!idea) return Result.err(new ComposerError({ message: "empty idea" }));
@@ -117,15 +126,16 @@ export async function draftIssue(opts: {
       idea,
       apiKey,
       opts.context,
-      opts.deadlineMs ?? 20_000,
+      opts.deadlineMs ?? 30_000,
       opts.fetchImpl ?? fetch,
     );
 
   const run = opts.runQuery ?? query;
   const prompt = userPrompt(idea, opts.context);
+  const emit = opts.onEvent;
 
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), opts.deadlineMs ?? 20_000);
+  const timer = setTimeout(() => abort.abort(), opts.deadlineMs ?? 30_000);
   try {
     const q = run({
       prompt,
@@ -136,7 +146,8 @@ export async function draftIssue(opts: {
         maxTurns: 4, // the structured-output tool call + finalize
         permissionMode: "bypassPermissions",
         settingSources: [], // skip ~/.claude — a real latency tax
-        thinking: { type: "disabled" }, // the biggest latency win
+        thinking: { type: "adaptive" }, // think for correctness; the UI shows it
+        includePartialMessages: !!emit, // stream reasoning to the console
         outputFormat: { type: "json_schema", schema: SCHEMA },
         strictMcpConfig: true,
         abortController: abort,
@@ -156,7 +167,21 @@ export async function draftIssue(opts: {
     let structured: unknown = null;
     let resultText = "";
     let errored = false;
+    let phase = "";
     for await (const m of q) {
+      if (emit && m.type === "stream_event") {
+        // thinking_delta = the model reasoning; input_json_delta = drafting the
+        // structured output. Surface both as phases (+ live reasoning text).
+        const d = (
+          m as { event?: { delta?: { type?: string; thinking?: string } } }
+        ).event?.delta;
+        if (d?.type === "thinking_delta") {
+          if (phase !== "thinking") emit({ phase: (phase = "thinking") });
+          if (d.thinking) emit({ phase: "thinking", text: d.thinking });
+        } else if (d?.type === "input_json_delta" && phase !== "drafting") {
+          emit({ phase: (phase = "drafting") });
+        }
+      }
       if (m.type === "result") {
         errored = m.subtype !== "success";
         structured =

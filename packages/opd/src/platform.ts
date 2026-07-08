@@ -245,12 +245,13 @@ export class Platform {
           reconciler,
           kickCrew: () => crewKick.fn(),
           draftIssue: claudeToken
-            ? async (idea, context) => {
+            ? async (idea, context, onEvent) => {
                 const d = await draftIssue({
                   idea,
                   oauthToken: claudeToken,
                   log,
                   ...(context ? { context } : {}),
+                  ...(onEvent ? { onEvent } : {}),
                 });
                 return d.status === "ok" ? d.value : null;
               }

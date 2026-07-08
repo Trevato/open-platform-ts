@@ -26,6 +26,10 @@ export interface ApiDeps {
     | ((
         idea: string,
         context?: string,
+        onEvent?: (ev: {
+          phase: "thinking" | "drafting";
+          text?: string;
+        }) => void,
       ) => Promise<{
         title: string;
         body: string;
@@ -228,7 +232,49 @@ export function apiRouter(
       const ctx = await deps.git.readFile(owner, repo, "main", "server.ts");
       const context =
         ctx.status === "ok" ? new TextDecoder().decode(ctx.value) : undefined;
-      const draft = await deps.draftIssue(body.idea, context);
+      const idea = body.idea;
+      const compose = deps.draftIssue;
+
+      // Streaming: reflect the model's real state (thinking → drafting → draft)
+      // so the console UI is responsive instead of frozen on a skeleton.
+      if (req.headers.get("accept")?.includes("text/event-stream")) {
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const enc = new TextEncoder();
+            const send = (o: unknown) => {
+              try {
+                controller.enqueue(
+                  enc.encode(`data: ${JSON.stringify(o)}\n\n`),
+                );
+              } catch {
+                /* client gone */
+              }
+            };
+            try {
+              const draft = await compose(idea, context, (ev) =>
+                send({ type: "event", ...ev }),
+              );
+              send(
+                draft
+                  ? { type: "draft", draft }
+                  : { type: "error", error: "composer_offline" },
+              );
+            } catch (e) {
+              send({ type: "error", error: String(e) });
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+          },
+        });
+      }
+
+      const draft = await compose(idea, context);
       if (!draft) return json({ error: "composer_offline" }, 503);
       return json(draft);
     }

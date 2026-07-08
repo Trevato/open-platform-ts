@@ -417,25 +417,44 @@ async function snap(b){b.classList.add('is-loading');b.disabled=true;
   toast(r.ok?('snapshot '+j.id):(j.error||'snapshot failed'));
 }
 // Curating flow: a rough idea → the composer drafts a structured issue you
-// edit → File. Degrades to filing the idea as-is when the composer is offline.
+// edit → File. Streams the model's real state (thinking → drafting) so the UI
+// stays responsive; degrades to the editable form if the composer can't answer.
+function composerWorking(phase,reasoning){
+  var label=phase==='drafting'?'drafting the spec':'thinking';
+  document.getElementById('draft').innerHTML=
+    '<div class="card pad mt-s"><div class="row" style="gap:8px;margin-bottom:10px"><span class="dot building"></span>'+
+    '<span class="mut" style="font-size:13px">'+label+'…</span><span class="mut" id="c-elapsed" style="font-size:12px;margin-left:auto"></span></div>'+
+    (reasoning?'<pre class="logs" id="c-reason" style="max-height:120px;font-size:11.5px">'+escHtml(reasoning)+'</pre>'
+      :'<div class="sk line w80"></div><div class="sk line"></div><div class="sk line w60"></div>')+
+    '</div>';
+  var re=document.getElementById('c-reason');if(re)re.scrollTop=re.scrollHeight;
+}
 async function compose(e){
   e.preventDefault();
   var idea=document.getElementById('idea').value.trim();if(!idea)return false;
   var b=document.getElementById('composebtn');b.classList.add('is-loading');b.disabled=true;
-  document.getElementById('draft').innerHTML='<div class="card pad mt-s"><div class="mut" style="font-size:13px;margin-bottom:10px">structuring this…</div><div class="sk line w80"></div><div class="sk line"></div><div class="sk line w60"></div></div>';
+  var degrade=function(msg){renderDraft(idea,{title:idea,body:'',labels:['agent-work'],acceptanceChecks:[]},true);if(msg)toast(msg);};
+  var t0=Date.now();composerWorking('thinking','');
+  var el=setInterval(function(){var x=document.getElementById('c-elapsed');if(x)x.textContent=Math.round((Date.now()-t0)/1000)+'s';},250);
   try{
-    var r=await fetch('/api/v1/repos/'+KEY+'/issues/draft',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({idea:idea})});
-    if(r.ok){var d=await r.json();renderDraft(idea,d,false);}
-    else{
-      // Composer failed/offline — NEVER file blind. Drop into the draft form
-      // (title=idea, empty spec) so you deliberately curate before filing.
-      renderDraft(idea,{title:idea,body:'',labels:['agent-work'],acceptanceChecks:[]},true);
-      toast(r.status===503?'composer offline — write a spec and file':'draft failed — write a spec and file');
+    var r=await fetch('/api/v1/repos/'+KEY+'/issues/draft',{method:'POST',headers:{'content-type':'application/json','accept':'text/event-stream'},body:JSON.stringify({idea:idea})});
+    if(!r.ok||!r.body){clearInterval(el);degrade(r.status===503?'composer offline — write a spec and file':'draft failed — write a spec and file');b.classList.remove('is-loading');b.disabled=false;return false;}
+    var reader=r.body.getReader(),dec=new TextDecoder(),buf='',draft=null,phase='thinking',reasoning='',failed=false;
+    while(true){
+      var chunk=await reader.read();if(chunk.done)break;
+      buf+=dec.decode(chunk.value,{stream:true});
+      var parts=buf.split('\\n\\n');buf=parts.pop();
+      for(var i=0;i<parts.length;i++){var line=parts[i];if(line.indexOf('data: ')!==0)continue;
+        var msg;try{msg=JSON.parse(line.slice(6));}catch(_){continue;}
+        if(msg.type==='event'){phase=msg.phase;if(msg.text)reasoning=(reasoning+msg.text).slice(-2000);composerWorking(phase,reasoning);}
+        else if(msg.type==='draft'){draft=msg.draft;}
+        else if(msg.type==='error'){failed=true;}
+      }
     }
-  }catch(err){
-    renderDraft(idea,{title:idea,body:'',labels:['agent-work'],acceptanceChecks:[]},true);
-    toast('draft failed — write a spec and file');
-  }
+    clearInterval(el);
+    if(draft)renderDraft(idea,draft,false);
+    else degrade(failed?'composer offline — write a spec and file':'draft failed — write a spec and file');
+  }catch(err){clearInterval(el);degrade('draft failed — write a spec and file');}
   b.classList.remove('is-loading');b.disabled=false;return false;
 }
 function renderDraft(idea,d,degraded){
