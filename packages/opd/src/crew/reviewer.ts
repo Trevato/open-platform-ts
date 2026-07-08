@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { Result, TaggedError, type Log } from "@op/core";
-import { loadAgent, type RunAgent } from "@op/crew";
+import type { RunAgent } from "@op/crew";
+import type { LoadAgent } from "../platform-config.ts";
 import { makeHeartbeat } from "./heartbeat.ts";
 
 export class ReviewError extends TaggedError("ReviewError")<{
@@ -88,9 +89,9 @@ export async function getQaSession(opts: {
 export interface ReviewerDeps {
   domain: string;
   httpsPort: number;
-  genesisDir: string;
   caFile: string;
   runAgent: RunAgent;
+  loadAgent: LoadAgent; // the reviewer role prompt, from git (plat/platform)
   oauthToken: string;
   qaUser: string;
   qaPassword: string;
@@ -157,10 +158,7 @@ export async function runReviewer(
           stderr: "ignore",
         }).exited;
 
-        const agent = await loadAgent(
-          join(deps.genesisDir, "crew"),
-          "reviewer",
-        );
+        const agent = await deps.loadAgent("reviewer");
         if (agent.status === "error")
           throw new Error(`load reviewer: ${agent.error.message}`);
 

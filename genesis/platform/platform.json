@@ -1,0 +1,6 @@
+{
+  "crew": {
+    "maxRework": 2,
+    "sweepMs": 30000
+  }
+}

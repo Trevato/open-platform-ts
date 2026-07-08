@@ -31,6 +31,7 @@ import { oidcRouter } from "./oidc.ts";
 import { ensureSigningKey } from "./oidc-clients.ts";
 import { Dispatcher } from "./crew/dispatcher.ts";
 import { makeContainerRunner } from "./crew/container-runner.ts";
+import { PLAT, PlatformConfig } from "./platform-config.ts";
 import { draftIssue } from "./crew/composer.ts";
 import {
   commitFiles,
@@ -156,16 +157,25 @@ export class Platform {
           Result.unwrap(
             await git.seedRepoFromDir(SYS.owner, SYS.name, work, "genesis"),
           );
-          const templateSrc = join(
-            opts.genesisDir ?? defaultGenesisDir(),
-            "app-template",
-          );
+          const genesisRoot = opts.genesisDir ?? defaultGenesisDir();
           Result.unwrap(await git.initBareRepo(TEMPLATE.owner, TEMPLATE.name));
           Result.unwrap(
             await git.seedRepoFromDir(
               TEMPLATE.owner,
               TEMPLATE.name,
-              templateSrc,
+              join(genesisRoot, "app-template"),
+              "genesis",
+            ),
+          );
+          // The platform's OWN config repo (crew prompts + tunables) — the
+          // self-modification surface. Seeded from disk once; reconciled from
+          // git thereafter.
+          Result.unwrap(await git.initBareRepo(PLAT.owner, PLAT.name));
+          Result.unwrap(
+            await git.seedRepoFromDir(
+              PLAT.owner,
+              PLAT.name,
+              join(genesisRoot, "platform"),
               "genesis",
             ),
           );
@@ -180,6 +190,8 @@ export class Platform {
         if (!store.getRepo(TEMPLATE.owner, TEMPLATE.name)) {
           store.createRepo(TEMPLATE.owner, TEMPLATE.name, { isTemplate: true });
         }
+        if (!store.getRepo(PLAT.owner, PLAT.name))
+          store.createRepo(PLAT.owner, PLAT.name);
 
         // Sovereignty gate on EVERY boot: all sealed values must decrypt with
         // OUR key and name exactly one recipient. Fail loud, not 20 min later.
@@ -300,6 +312,16 @@ export class Platform {
         gate.start();
         reconciler.start();
 
+        // The platform's OWN config, in git (plat/platform). Hot-reloaded on
+        // push — a commit to that repo re-reads settings + crew prompts live,
+        // no restart. This is the self-modification surface (the Flux concept).
+        const platformConfig = new PlatformConfig(git, log);
+        await platformConfig.reload();
+        git.onPush((evt) => {
+          if (evt.owner === PLAT.owner && evt.name === PLAT.name)
+            void platformConfig.reload();
+        });
+
         // The AI build crew. The Claude Code OAuth token is BYO (sk-ant-oat01,
         // from `claude setup-token`) — the ONLY credential that can drive an
         // agent. Without it the dispatcher still runs but posts a "set a token"
@@ -313,7 +335,8 @@ export class Platform {
           git,
           domain: opts.domain,
           httpsPort: opts.httpsPort,
-          genesisDir: opts.genesisDir ?? defaultGenesisDir(),
+          loadAgent: (role) => platformConfig.loadAgent(role),
+          config: () => platformConfig.get(),
           systemActor: adminUser ?? {
             id: "",
             username: ADMIN_USER,

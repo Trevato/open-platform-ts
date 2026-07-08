@@ -9,9 +9,10 @@ import {
   type Log,
   type StateDir,
 } from "@op/core";
-import { loadAgent, type RunAgent } from "@op/crew";
+import type { RunAgent } from "@op/crew";
 import type { Forge } from "@op/forge";
 import type { IssueRow, UserRow } from "@op/store";
+import type { LoadAgent } from "../platform-config.ts";
 import { makeHeartbeat } from "./heartbeat.ts";
 
 export class BuilderError extends TaggedError("BuilderError")<{
@@ -87,9 +88,9 @@ export interface BuilderDeps {
   sd: StateDir;
   forge: Forge;
   domain: string;
-  genesisDir: string;
   systemActor: UserRow; // the platform admin the driver acts as for the push/PR
   runAgent: RunAgent;
+  loadAgent: LoadAgent; // the builder role prompt, from git (plat/platform)
   oauthToken: string;
   log: Log;
   onProgress?: (line: string) => void;
@@ -153,7 +154,7 @@ export async function runBuilder(
         // checkout (source + .git) writable so it can edit and commit.
         await makeWritable(checkout);
 
-        const agent = await loadAgent(join(deps.genesisDir, "crew"), "builder");
+        const agent = await deps.loadAgent("builder");
         if (agent.status === "error")
           throw new Error(`load builder: ${agent.error.message}`);
 

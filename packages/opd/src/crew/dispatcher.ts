@@ -3,6 +3,11 @@ import type { RunAgent } from "@op/crew";
 import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
 import type { IssueRow, Store, UserRow } from "@op/store";
+import {
+  PLAT,
+  type LoadAgent,
+  type PlatformSettings,
+} from "../platform-config.ts";
 import { runBuilder } from "./builder.ts";
 import { runReviewer } from "./reviewer.ts";
 
@@ -13,7 +18,6 @@ const REWORK_LABEL = "agent-reworking";
 const SHIPPED_LABEL = "agent-shipped";
 const FAILED_LABEL = "agent-failed";
 const REVIEW_FAILED_LABEL = "agent-review-failed";
-const DEFAULT_MAX_REWORK = 2;
 
 export interface DispatcherDeps {
   sd: StateDir;
@@ -22,10 +26,13 @@ export interface DispatcherDeps {
   git: GitHost;
   domain: string;
   httpsPort: number;
-  genesisDir: string;
   systemActor: UserRow;
   /** Bound model runner, or null when no Claude credential is configured. */
   runAgent: RunAgent | null;
+  /** The crew role prompts, from git (plat/platform) — hot-reloadable. */
+  loadAgent: LoadAgent;
+  /** Live platform settings (crew.maxRework, sweepMs), re-read from git on push. */
+  config: () => PlatformSettings;
   oauthToken: string | null;
   /** Platform CA (path + text) for the reviewer's TLS to the preview/issuer. */
   caFile: string;
@@ -61,7 +68,7 @@ export class Dispatcher {
 
   constructor(private readonly deps: DispatcherDeps) {}
 
-  start(sweepMs = 30_000): void {
+  start(sweepMs = this.deps.config().crew.sweepMs): void {
     this.timer = setInterval(() => void this.tick(), sweepMs);
     void this.tick();
   }
@@ -136,20 +143,7 @@ export class Dispatcher {
     );
     log.info("crew: building", { issue: this.key(issue) });
 
-    const built = await runBuilder(
-      {
-        sd: this.deps.sd,
-        forge: this.deps.forge,
-        domain: this.deps.domain,
-        genesisDir: this.deps.genesisDir,
-        systemActor: this.deps.systemActor,
-        runAgent: this.deps.runAgent,
-        oauthToken: this.deps.oauthToken,
-        log,
-        onProgress: (line) => this.comment(issue, line),
-      },
-      issue,
-    );
+    const built = await runBuilder(this.builderDeps(issue), issue);
 
     if (built.status === "error") {
       log.error("crew: build failed", {
@@ -164,13 +158,30 @@ export class Dispatcher {
       return;
     }
 
-    // The PR was opened in-process (no push event), so kick the reconciler to
-    // build its preview environment with forked data.
-    this.deps.kickReconciler();
-
     const pr = built.value.prNumber;
     const port = this.portSuffix();
     const prUrl = `https://${this.deps.domain}${port}/apps/${issue.owner}/${issue.repo}/pulls/${pr}`;
+
+    // Self-modification (plat/platform): the config repo has no app to deploy,
+    // so there's no live preview to review. The crew PROPOSES the change; a
+    // human reviews the diff and merges (merging hot-applies it). Higher stakes,
+    // human gate — no auto-merge, no preview.
+    if (issue.owner === PLAT.owner && issue.repo === PLAT.name) {
+      this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
+      this.comment(
+        issue,
+        `🛠️ Proposed the change in PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). This edits the running platform (\`${PLAT.owner}/${PLAT.name}\`) — review the diff and **merge to apply it live** (a push to \`${PLAT.name}\` hot-reloads; no restart).`,
+      );
+      log.info("crew: platform change proposed", {
+        issue: this.key(issue),
+        pr,
+      });
+      return;
+    }
+
+    // The PR was opened in-process (no push event), so kick the reconciler to
+    // build its preview environment with forked data.
+    this.deps.kickReconciler();
     const previewHost = `pr-${pr}-${issue.repo}-${issue.owner}.${this.deps.domain}`;
     this.setLabels(issue, [...labels, REVIEWING_LABEL]);
     this.comment(
@@ -184,7 +195,7 @@ export class Dispatcher {
     });
 
     // Build → review → (rework on ❌)* until it passes or we give up.
-    const maxRework = this.deps.maxRework ?? DEFAULT_MAX_REWORK;
+    const maxRework = this.deps.maxRework ?? this.deps.config().crew.maxRework;
     let attempt = 0;
     if (!(await this.waitForPreview(previewHost)))
       return this.park(
@@ -240,7 +251,10 @@ export class Dispatcher {
         );
       }
 
-      // ✅/⚠️ → auto-merge, ship, done.
+      // ✅/⚠️ → auto-merge, ship, done. EXCEPT the platform's own config repo:
+      // a change to plat/platform alters the running daemon (prompts, tunables),
+      // so it never auto-merges — the crew PROPOSES, a human merges (the merge
+      // triggers the hot-reload). Higher stakes → a human gate.
       if (v.kind === "pass" || v.kind === "concerns") {
         const merged = await this.deps.forge.mergePr(
           this.deps.systemActor,
@@ -362,9 +376,9 @@ export class Dispatcher {
       sd: this.deps.sd,
       forge: this.deps.forge,
       domain: this.deps.domain,
-      genesisDir: this.deps.genesisDir,
       systemActor: this.deps.systemActor,
       runAgent: this.deps.runAgent!,
+      loadAgent: this.deps.loadAgent,
       oauthToken: this.deps.oauthToken!,
       log: this.deps.log,
       onProgress: (line: string) => this.comment(issue, line),
@@ -375,9 +389,9 @@ export class Dispatcher {
     return {
       domain: this.deps.domain,
       httpsPort: this.deps.httpsPort,
-      genesisDir: this.deps.genesisDir,
       caFile: this.deps.caFile,
       runAgent: this.deps.runAgent!,
+      loadAgent: this.deps.loadAgent,
       oauthToken: this.deps.oauthToken!,
       qaUser: this.deps.qaUser,
       qaPassword: this.deps.qaPassword,

@@ -12,7 +12,15 @@ import { runBuilder } from "../src/crew/builder.ts";
 import { Dispatcher, type DispatcherDeps } from "../src/crew/dispatcher.ts";
 import { parseVerdict } from "../src/crew/reviewer.ts";
 
-const GENESIS = join(import.meta.dir, "..", "..", "..", "genesis");
+// Crew prompts + settings now come from a loadAgent()/config() seam (git-backed
+// in production, faked here).
+const fakeLoadAgent = async (role: string) =>
+  Result.ok({
+    role,
+    instructions: `test ${role} prompt`,
+    skills: [] as string[],
+  });
+const fakeConfig = () => ({ crew: { maxRework: 2, sweepMs: 30_000 } });
 
 // The fake runner plays both roles: as the reviewer (cwd has REVIEW.md) it
 // returns a verdict line; as the builder it writes a feature file.
@@ -51,7 +59,8 @@ function dispatcherReviewDeps(
     git: h.git,
     domain: "plat.localtest.me",
     httpsPort: 18443,
-    genesisDir: GENESIS,
+    loadAgent: fakeLoadAgent,
+    config: fakeConfig,
     systemActor: h.admin,
     runAgent,
     oauthToken: runAgent ? "sk-ant-oat01-test" : null,
@@ -106,7 +115,7 @@ function builderDeps(
     sd: h.sd,
     forge: h.forge,
     domain: "plat.localtest.me",
-    genesisDir: GENESIS,
+    loadAgent: fakeLoadAgent,
     systemActor: admin,
     runAgent,
     oauthToken: "sk-ant-oat01-test",
@@ -164,10 +173,11 @@ async function settle(
   h: Awaited<ReturnType<typeof harness>>,
   num = 1,
   timeoutMs = 20_000,
+  repo = "app",
 ): Promise<void> {
   const start = performance.now();
   while (performance.now() - start < timeoutMs) {
-    const issue = h.store.getIssue("plat", "app", num);
+    const issue = h.store.getIssue("plat", repo, num);
     const labels = issue?.labels.split(",") ?? [];
     if (TERMINAL.some((t) => labels.includes(t))) return;
     await Bun.sleep(40);
@@ -451,6 +461,62 @@ describe("dispatcher", () => {
     const issue = h.store.getIssue("plat", "app", 1)!;
     expect(issue.labels.split(",")).toContain("agent-failed");
     expect(h.store.getPr("plat", "app", 1)?.state).toBe("open");
+  });
+
+  test("a plat/platform (self-mod) issue is PROPOSED for a human — no auto-merge, no review", async () => {
+    const h = await harness();
+    // The platform's own config repo — no app to deploy, so no preview/review.
+    const seed = await mkdtemp(join(tmpdir(), "op-plat-"));
+    dirs.push(seed);
+    await writeFile(
+      join(seed, "platform.json"),
+      '{"crew":{"maxRework":2,"sweepMs":30000}}',
+    );
+    Result.unwrap(await h.forge.createRepo(h.admin, "plat", "platform"));
+    Result.unwrap(
+      await h.git.seedRepoFromDir("plat", "platform", seed, "init"),
+    );
+    let reviewed = false;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md"))) {
+        reviewed = true;
+        return Result.ok({
+          ok: true,
+          result: "✅ PASS",
+          costUsd: 0,
+          numTurns: 1,
+        });
+      }
+      await writeFile(join(run.cwd, "TWEAK.md"), "prompt tweak\n");
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.02,
+        numTurns: 1,
+      });
+    };
+    const d = new Dispatcher(dispatcherReviewDeps(h, runAgent));
+    h.store.createIssue("plat", "platform", {
+      title: "tweak the builder prompt",
+      body: "b",
+      author: "plat",
+      labels: ["agent-work"],
+    });
+    await d.tick();
+    await settle(h, 1, 20_000, "platform");
+
+    expect(reviewed).toBe(false); // config repo: no preview → the reviewer never runs
+    const pr = h.store.getPr("plat", "platform", 1);
+    expect(pr?.number).toBe(1); // proposed…
+    expect(pr?.state).toBe("open"); // …but NOT auto-merged (human gate)
+    const issue = h.store.getIssue("plat", "platform", 1)!;
+    expect(issue.labels.split(",")).toContain("agent-review-failed");
+    const comments = h.store
+      .listComments("plat", "platform", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("Proposed the change");
+    expect(comments).toContain("merge to apply it live");
   });
 
   test("without a credential, posts a note and does not build", async () => {
