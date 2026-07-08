@@ -4,6 +4,7 @@ import type { GitHost } from "@op/git";
 import { readLineage } from "@op/mitosis";
 import type { Store } from "@op/store";
 import { readAppSpecs } from "../gitops.ts";
+import { isSelfRepo, OPD, PLAT } from "../platform-config.ts";
 import { authorizeFor } from "../oidc.ts";
 import { hostFor } from "../policy.ts";
 import { type Chrome, type Crumb, esc, html, page } from "./layout.ts";
@@ -160,6 +161,7 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
       path === "/" ||
       path === "/lineage" ||
       path === "/crew" ||
+      path === "/platform" ||
       path.startsWith("/apps/");
     if (!isConsolePath) return null;
 
@@ -248,25 +250,43 @@ setInterval(refresh,2500);`,
       const appUrl = `https://${app}-${owner}.${deps.domain}${url.port ? `:${url.port}` : ""}/`;
       const cloneUrl = `${o}/${owner}/${app}.git`;
       const canWrite = deps.forge.authorize(user, owner, app, "write");
+      // System/self repos (plat/opd source, plat/platform config, sys/gitops)
+      // are NOT deployed apps — they have no URL, image, deploys or logs. Show
+      // them as repos: identity + issues + PRs, none of the deploy chrome.
+      const isSelf = isSelfRepo(owner, app) || owner === "sys";
+      const role =
+        app === OPD.name
+          ? "platform source"
+          : app === PLAT.name
+            ? "platform config"
+            : "system repo";
 
       const body = `
 <div class="row between">
-  <h1 class="m0"><span class="dot ${esc(state)}" id="dot"></span>${esc(app)}</h1>
-  <a class="${appUrl ? "btn secondary sm" : "hide"}" href="${esc(appUrl)}" target="_blank" rel="noopener">Open ↗</a>
+  <h1 class="m0">${isSelf ? "" : `<span class="dot ${esc(state)}" id="dot"></span>`}${esc(app)}</h1>
+  ${isSelf ? "" : `<a class="btn secondary sm" href="${esc(appUrl)}" target="_blank" rel="noopener">Open ↗</a>`}
 </div>
-<p class="sub"><span class="state" id="state">${esc(state)}</span>${st?.message ? ` · <span class="mut" id="stmsg">${esc(st.message)}</span>` : ""}</p>
+${
+  isSelf
+    ? `<p class="sub">${esc(owner)}/${esc(app)} · ${esc(role)}</p>`
+    : `<p class="sub"><span class="state" id="state">${esc(state)}</span>${st?.message ? ` · <span class="mut" id="stmsg">${esc(st.message)}</span>` : ""}</p>`
+}
 
 <div class="card idcard">
-  <span class="k">URL</span><span class="v"><a href="${esc(appUrl)}" target="_blank" rel="noopener">${esc(appUrl)}</a></span>
+  ${isSelf ? "" : `<span class="k">URL</span><span class="v"><a href="${esc(appUrl)}" target="_blank" rel="noopener">${esc(appUrl)}</a></span>`}
   <span class="k">Clone</span><span class="v"><button class="btn ghost sm" onclick="copy(${JSON.stringify(cloneUrl)})" data-tip="Copy git URL">${esc(cloneUrl)} ⧉</button></span>
-  <span class="k">Image</span><span class="v" id="digest">${st?.image_digest ? esc(st.image_digest.slice(0, 26)) + "…" : "—"}</span>
+  ${isSelf ? "" : `<span class="k">Image</span><span class="v" id="digest">${st?.image_digest ? esc(st.image_digest.slice(0, 26)) + "…" : "—"}</span>`}
 </div>
 
 <div class="tabs" role="tablist">
   <button class="tab on" data-pane="issues" role="tab">Issues <span class="mut" id="ic"></span></button>
   <button class="tab" data-pane="prs" role="tab">Pull requests <span class="mut" id="pc"></span></button>
-  <button class="tab" data-pane="deploys" role="tab">Deploys</button>
-  <button class="tab" data-pane="logs" role="tab">Logs</button>
+  ${
+    isSelf
+      ? ""
+      : `<button class="tab" data-pane="deploys" role="tab">Deploys</button>
+  <button class="tab" data-pane="logs" role="tab">Logs</button>`
+  }
 </div>
 
 <div class="row between mt filterbar" id="filterbar">
@@ -695,6 +715,57 @@ async function tick(){
   }catch(_){}
 }
 tick();setInterval(tick,2000);`,
+      );
+    }
+
+    // ── platform ────────────────────────────────────────────────────────
+    if (path === "/platform") {
+      // The Config repo (plat/platform) exists on every boot; the Source repo
+      // (plat/opd) only after `op host-source`. Don't link to a repo that isn't
+      // there — a germinated daughter that never hosted its source would get a
+      // dead "Not found" card otherwise.
+      const opdHosted = deps.store.getRepo(OPD.owner, OPD.name) !== null;
+      const sourceCard = opdHosted
+        ? `<a class="card app" href="/apps/plat/opd">
+  <div class="name">Source</div>
+  <div class="host">plat/opd</div>
+  <p class="sub" style="margin:6px 0">The platform's own code. An issue here → the crew edits the daemon → self-upgrade applies it.</p>
+  <div class="foot"><span class="mut" id="ic-opd"></span><span>File an issue →</span></div>
+</a>`
+        : `<div class="card app">
+  <div class="name">Source</div>
+  <div class="host">plat/opd</div>
+  <p class="sub" style="margin:6px 0">The platform's own code — not hosted here yet. Run <code>op host-source</code> to publish it, then the crew can edit the daemon.</p>
+  <div class="foot"><span class="mut">not hosted</span></div>
+</div>`;
+      const body = `
+<h1>Platform</h1>
+<p class="sub">Change the platform itself — file an issue and the crew builds it.</p>
+<div class="grid">
+${sourceCard}
+<a class="card app" href="/apps/plat/platform">
+  <div class="name">Config</div>
+  <div class="host">plat/platform</div>
+  <p class="sub" style="margin:6px 0">Crew prompts + settings. Merging hot-reloads it live, no restart.</p>
+  <div class="foot"><span class="mut" id="ic-platform"></span><span>File an issue →</span></div>
+</a>
+</div>`;
+      return page(
+        "Platform",
+        chrome("platform", [{ label: "Platform" }]),
+        body,
+        `
+async function issueCount(repo,el){
+  try{
+    var r=await fetch('/api/v1/repos/'+repo+'/issues?state=open');
+    if(!r.ok) return;
+    var d=await r.json();
+    var n=document.getElementById(el);
+    if(n) n.textContent='('+d.issues.length+' open)';
+  }catch(_){}
+}
+${opdHosted ? "issueCount('plat/opd','ic-opd');" : ""}
+issueCount('plat/platform','ic-platform');`,
       );
     }
 
