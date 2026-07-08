@@ -5,6 +5,7 @@ import type { GitHost } from "@op/git";
 import type { IssueRow, Store, UserRow } from "@op/store";
 import {
   PLAT,
+  isSelfRepo,
   type LoadAgent,
   type PlatformSettings,
 } from "../platform-config.ts";
@@ -162,20 +163,18 @@ export class Dispatcher {
     const port = this.portSuffix();
     const prUrl = `https://${this.deps.domain}${port}/apps/${issue.owner}/${issue.repo}/pulls/${pr}`;
 
-    // Self-modification (plat/platform): the config repo has no app to deploy,
-    // so there's no live preview to review. The crew PROPOSES the change; a
-    // human reviews the diff and merges (merging hot-applies it). Higher stakes,
-    // human gate — no auto-merge, no preview.
-    if (issue.owner === PLAT.owner && issue.repo === PLAT.name) {
+    // Self-modification: the platform's own config (plat/platform) or source
+    // (plat/opd) is not a deployed app — there's no live preview to review. The
+    // crew PROPOSES the change; a human reviews the diff and merges. Higher
+    // stakes, human gate — no auto-merge, no preview.
+    if (isSelfRepo(issue.owner, issue.repo)) {
+      const isConfig = issue.repo === PLAT.name;
       this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
       this.comment(
         issue,
-        `🛠️ Proposed the change in PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). This edits the running platform (\`${PLAT.owner}/${PLAT.name}\`) — review the diff and **merge to apply it live** (a push to \`${PLAT.name}\` hot-reloads; no restart).`,
+        `🛠️ Proposed the change in PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). This edits the platform's own ${isConfig ? "config" : "source"} (\`${issue.owner}/${issue.repo}\`) — review the diff and merge. ${isConfig ? `A push to \`${PLAT.name}\` hot-reloads it; no restart.` : "Applying source changes needs `op upgrade` or a restart."}`,
       );
-      log.info("crew: platform change proposed", {
-        issue: this.key(issue),
-        pr,
-      });
+      log.info("crew: self-change proposed", { issue: this.key(issue), pr });
       return;
     }
 
@@ -379,6 +378,8 @@ export class Dispatcher {
       systemActor: this.deps.systemActor,
       runAgent: this.deps.runAgent!,
       loadAgent: this.deps.loadAgent,
+      // The platform's own repos get the platform-dev prompt, not the app builder.
+      role: isSelfRepo(issue.owner, issue.repo) ? "platform-dev" : "builder",
       oauthToken: this.deps.oauthToken!,
       log: this.deps.log,
       onProgress: (line: string) => this.comment(issue, line),

@@ -15,6 +15,19 @@ import type { GitHost } from "@op/git";
 // itself) are frozen in the binary and are NOT in this repo — structurally
 // unreachable by self-modification.
 export const PLAT = { owner: "plat", name: "platform" } as const;
+// The platform's own SOURCE (the opd monorepo), hosted on itself so the crew
+// can author code changes to the daemon — applied by `op upgrade` (self-upgrade)
+// or a restart, unlike the hot-reloadable config in plat/platform.
+export const OPD = { owner: "plat", name: "opd" } as const;
+
+/** True for a repo that is the platform ITSELF (config or source) rather than a
+ *  deployed app — these are proposed to a human, never auto-merged/previewed. */
+export function isSelfRepo(owner: string, repo: string): boolean {
+  return (
+    (owner === PLAT.owner && repo === PLAT.name) ||
+    (owner === OPD.owner && repo === OPD.name)
+  );
+}
 
 export class PlatformConfigError extends TaggedError("PlatformConfigError")<{
   message: string;

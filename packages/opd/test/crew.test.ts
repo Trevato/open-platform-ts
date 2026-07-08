@@ -516,7 +516,7 @@ describe("dispatcher", () => {
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("Proposed the change");
-    expect(comments).toContain("merge to apply it live");
+    expect(comments).toContain("review the diff and merge");
   });
 
   test("without a credential, posts a note and does not build", async () => {

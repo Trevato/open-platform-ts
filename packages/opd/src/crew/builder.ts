@@ -90,7 +90,10 @@ export interface BuilderDeps {
   domain: string;
   systemActor: UserRow; // the platform admin the driver acts as for the push/PR
   runAgent: RunAgent;
-  loadAgent: LoadAgent; // the builder role prompt, from git (plat/platform)
+  loadAgent: LoadAgent; // the role prompt, from git (plat/platform)
+  /** Agent role: "builder" for apps, "platform-dev" for the platform's own
+   *  source/config repos. Defaults to "builder". */
+  role?: string;
   oauthToken: string;
   log: Log;
   onProgress?: (line: string) => void;
@@ -154,9 +157,10 @@ export async function runBuilder(
         // checkout (source + .git) writable so it can edit and commit.
         await makeWritable(checkout);
 
-        const agent = await deps.loadAgent("builder");
+        const role = deps.role ?? "builder";
+        const agent = await deps.loadAgent(role);
         if (agent.status === "error")
-          throw new Error(`load builder: ${agent.error.message}`);
+          throw new Error(`load ${role}: ${agent.error.message}`);
 
         // Capture the branch head so rework can detect a no-op fix.
         const headBefore = await revParse(checkout);
@@ -170,8 +174,8 @@ export async function runBuilder(
           cwd: checkout,
           systemPrompt: agent.value.instructions,
           prompt: rework
-            ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers in this app, keeping everything else working (auth, the OIDC login, the JSON/HTML contract, existing data). Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.`
-            : "Read ISSUE.md and implement exactly what it asks in this app, then commit your work locally with a clear message. Do not push; do not open a pull request.",
+            ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers, keeping everything else working. Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.`
+            : "Read ISSUE.md and implement exactly what it asks in this repository, then commit your work locally with a clear message. Do not push; do not open a pull request.",
           oauthToken: deps.oauthToken,
           allowedTools: BUILDER_ALLOWED_TOOLS,
           disallowedTools: BUILDER_DENIED_TOOLS,
