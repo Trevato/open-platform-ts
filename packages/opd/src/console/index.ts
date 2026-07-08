@@ -425,23 +425,34 @@ async function compose(e){
   document.getElementById('draft').innerHTML='<div class="card pad mt-s"><div class="mut" style="font-size:13px;margin-bottom:10px">structuring this…</div><div class="sk line w80"></div><div class="sk line"></div><div class="sk line w60"></div></div>';
   try{
     var r=await fetch('/api/v1/repos/'+KEY+'/issues/draft',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({idea:idea})});
-    if(r.status===503){document.getElementById('draft').innerHTML='';await fileIssue(idea,idea,['agent-work']);toast('composer offline — filed as-is');}
-    else{var d=await r.json();if(!r.ok)throw new Error(d.error||'failed');renderDraft(idea,d);}
-  }catch(err){document.getElementById('draft').innerHTML='';toast(String((err&&err.message)||err));}
+    if(r.ok){var d=await r.json();renderDraft(idea,d,false);}
+    else{
+      // Composer failed/offline — NEVER file blind. Drop into the draft form
+      // (title=idea, empty spec) so you deliberately curate before filing.
+      renderDraft(idea,{title:idea,body:'',labels:['agent-work'],acceptanceChecks:[]},true);
+      toast(r.status===503?'composer offline — write a spec and file':'draft failed — write a spec and file');
+    }
+  }catch(err){
+    renderDraft(idea,{title:idea,body:'',labels:['agent-work'],acceptanceChecks:[]},true);
+    toast('draft failed — write a spec and file');
+  }
   b.classList.remove('is-loading');b.disabled=false;return false;
 }
-function renderDraft(idea,d){
+function renderDraft(idea,d,degraded){
   window._idea=idea;
   var spec=(d.body||'')+((d.acceptanceChecks&&d.acceptanceChecks.length)?'\\n\\nAcceptance checks:\\n'+d.acceptanceChecks.map(function(c){return '- '+c}).join('\\n'):'');
   var labels=d.labels&&d.labels.length?d.labels:['agent-work'];
+  var note=degraded?'couldn\\'t auto-draft — write the spec, then file':'drafted by the composer — edit anything';
+  var ph=degraded?' placeholder="Describe what to build: the data, the endpoints, the UI, and the safety rules the reviewer will check."':'';
   document.getElementById('composer-form').classList.add('hide');
   document.getElementById('draft').innerHTML=
-    '<div class="card pad stack mt-s">'+
+    '<div class="card pad stack mt-s'+(degraded?' warn':'')+'">'+
     '<div><div class="label mb">Title</div><input type="text" id="d-title" class="grow" value="'+escHtml(d.title||idea)+'"></div>'+
-    '<div><div class="label mb">Spec</div><textarea id="d-body" rows="7">'+escHtml(spec)+'</textarea></div>'+
+    '<div><div class="label mb">Spec</div><textarea id="d-body" rows="7"'+ph+'>'+escHtml(spec)+'</textarea></div>'+
     '<div class="row"><span class="label">Labels</span><span id="d-labels">'+labels.map(function(l){return '<span class="pill agent chip rm" data-l="'+escHtml(l)+'" onclick="this.remove()">'+escHtml(l)+' ×</span>'}).join(' ')+'</span></div>'+
-    '<div class="row"><button onclick="fileDraft(this)">File issue</button><button class="btn ghost" onclick="rewrite()">Rewrite</button><span class="mut" style="font-size:12px">drafted by the composer — edit anything</span></div>'+
+    '<div class="row"><button onclick="fileDraft(this)">File issue</button><button class="btn ghost" onclick="rewrite()">Rewrite</button><span class="mut" style="font-size:12px">'+note+'</span></div>'+
     '</div>';
+  if(degraded){var t=document.getElementById('d-body');if(t)t.focus();}
 }
 async function fileDraft(b){
   var title=document.getElementById('d-title').value.trim();var body=document.getElementById('d-body').value.trim();

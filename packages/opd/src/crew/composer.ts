@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Result, TaggedError, type Log } from "@op/core";
 
 // The "curating not building" composer: a fast model turns a rough one-line
@@ -17,7 +19,8 @@ export interface IssueDraft {
   acceptanceChecks: string[];
 }
 
-const CLAUDE_BIN = process.env["OP_CLAUDE_BIN"] ?? "claude";
+// Read at call time (not module load) so tests can override the binary.
+const claudeBin = () => process.env["OP_CLAUDE_BIN"] ?? "claude";
 const MODEL = process.env["OP_COMPOSER_MODEL"] ?? "claude-haiku-4-5";
 
 const SYSTEM = `You are the platform's issue composer. Turn a rough one-line idea into a crisp issue for a caged AI builder that implements it end to end in a single-file Bun + bun:sqlite app served over OIDC.
@@ -66,7 +69,7 @@ export async function draftIssue(opts: {
 
   const proc = Bun.spawn(
     [
-      CLAUDE_BIN,
+      claudeBin(),
       "-p",
       prompt,
       "--append-system-prompt",
@@ -87,27 +90,35 @@ export async function draftIssue(opts: {
         HOME: process.env["HOME"] ?? "/tmp",
         LANG: process.env["LANG"] ?? "C.UTF-8",
         CLAUDE_CODE_OAUTH_TOKEN: opts.oauthToken,
+        // Isolate config from the operator's ~/.claude (avoids lock contention).
+        CLAUDE_CONFIG_DIR: join(homedir(), ".op-composer-cfg"),
       },
+      // Close stdin: with an open stdin pipe, `claude -p` waits for input and
+      // never exits — the composer would hang until the deadline. This is THE
+      // reliability fix.
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     },
   );
 
-  const timer = setTimeout(() => proc.kill(), opts.deadlineMs ?? 20_000);
+  // Haiku-via-CLI latency is variable (~5-25s). A generous deadline lets slow
+  // calls finish behind the skeleton; the console degrades gracefully past it.
+  const timer = setTimeout(() => proc.kill(), opts.deadlineMs ?? 35_000);
   try {
+    // Drain stdout/stderr CONCURRENTLY with waiting for exit — reading only
+    // after exit can deadlock if the child fills the pipe buffer.
+    const stdoutP = new Response(proc.stdout).text();
+    const stderrP = new Response(proc.stderr).text();
     const code = await proc.exited;
-    if (code !== 0) {
-      const err = await new Response(proc.stderr).text();
+    const [out, err] = await Promise.all([stdoutP, stderrP]);
+    if (code !== 0)
       return Result.err(
         new ComposerError({
           message: `composer exited ${code}: ${err.slice(0, 200)}`,
         }),
       );
-    }
-    const wrap = JSON.parse(await new Response(proc.stdout).text()) as {
-      result?: string;
-      is_error?: boolean;
-    };
+    const wrap = JSON.parse(out) as { result?: string; is_error?: boolean };
     if (wrap.is_error || !wrap.result)
       return Result.err(
         new ComposerError({ message: "composer returned no result" }),
