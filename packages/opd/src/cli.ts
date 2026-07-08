@@ -138,6 +138,34 @@ async function main(): Promise<number> {
       await new Promise(() => {});
       return 0;
     }
+    case "host-source": {
+      const srcDir =
+        rest[0] ??
+        process.env["OP_SRC"] ??
+        join(import.meta.dir, "..", "..", "..");
+      const booted = await Platform.up(optsFromEnv(domain));
+      if (booted.status === "error") {
+        console.error(`op host-source FAILED: ${booted.error.message}`);
+        return 1;
+      }
+      const hosted = await booted.value.hostSource(srcDir);
+      await booted.value.stop();
+      if (hosted.status === "error") {
+        console.error(`op host-source FAILED: ${hosted.error.message}`);
+        return 1;
+      }
+      console.log(
+        hosted.value.created
+          ? `hosted plat/opd from ${srcDir} — the crew can now edit the platform; push to plat/opd to self-upgrade`
+          : "plat/opd already hosted",
+      );
+      const root = env("OP_ROOT", join(homedir(), ".op", domain));
+      const sourceRepo = join(root, "repos", "plat", "opd.git");
+      console.log(`  git clone ${sourceRepo} <dir>`);
+      console.log(`  cd <dir> && bun install`);
+      console.log(`  OP_SRC=<dir> op up`);
+      return 0;
+    }
     case "lineage": {
       const root = env("OP_ROOT", join(homedir(), ".op", domain));
       for (const line of await readLineage(join(root, "ORIGIN")))
@@ -146,7 +174,7 @@ async function main(): Promise<number> {
     }
     default:
       console.log(
-        "op — Open Platform\n\n  op up          boot (or resume) the platform\n  op seed [out]  export a seed of this platform\n  op germinate   grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op lineage     print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
+        "op — Open Platform\n\n  op up                 boot (or resume) the platform\n  op seed [out]         export a seed of this platform\n  op germinate          grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op host-source [dir]  publish the platform's own source into plat/opd (OP_SRC=)\n  op lineage            print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
       );
       return cmd ? 2 : 0;
   }

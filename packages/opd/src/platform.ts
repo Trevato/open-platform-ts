@@ -559,6 +559,74 @@ export class Platform {
     });
   }
 
+  /**
+   * Publish this platform's own source into plat/opd so the crew can edit the
+   * daemon and the supervisor can self-upgrade from it.
+   *
+   * Publishes TRACKED source only, via `git archive HEAD` — an allowlist that
+   * excludes untracked files (secrets, node_modules), carries no .git history
+   * into this world-readable repo, and yields a clean single commit. (cp -r'ing
+   * srcDir would leak history + committed-then-ignored secrets, and would fail
+   * to commit at all on a clean checkout — the actual bootstrap case.)
+   *
+   * Idempotent + repair-safe: it skips only when plat/opd already has content
+   * (a populated `main`), not merely a store row — so a partial seed re-runs
+   * instead of wedging the repo.
+   */
+  async hostSource(
+    srcDir: string,
+  ): Promise<Result<{ created: boolean }, PlatformError>> {
+    return Result.tryPromise({
+      try: async () => {
+        const listed = await this.git.listFiles(OPD.owner, OPD.name, "main");
+        if (listed.status === "ok" && listed.value.length > 0)
+          return { created: false };
+
+        const admin = this.store.getUser(ADMIN_USER);
+        if (!admin) throw new Error("admin user missing");
+        if (!this.store.getRepo(OPD.owner, OPD.name))
+          Result.unwrap(
+            await this.forge.createRepo(admin, OPD.owner, OPD.name),
+          );
+
+        const tmp = await mkdtemp(join(tmpdir(), "op-hostsrc-"));
+        try {
+          const work = join(tmp, "src");
+          await mkdir(work, { recursive: true });
+          const tarFile = join(tmp, "src.tar");
+          const archive = Bun.spawn(
+            ["git", "-C", srcDir, "archive", "-o", tarFile, "HEAD"],
+            { stderr: "pipe" },
+          );
+          if ((await archive.exited) !== 0)
+            throw new Error(
+              `git archive HEAD failed (is ${srcDir} a git repo with a commit?): ${await new Response(archive.stderr).text()}`,
+            );
+          const untar = Bun.spawn(["tar", "-xf", tarFile, "-C", work], {
+            stderr: "pipe",
+          });
+          if ((await untar.exited) !== 0)
+            throw new Error(
+              `tar extract: ${await new Response(untar.stderr).text()}`,
+            );
+          Result.unwrap(
+            await this.git.seedRepoFromDir(
+              OPD.owner,
+              OPD.name,
+              work,
+              "host source",
+            ),
+          );
+        } finally {
+          await rm(tmp, { recursive: true, force: true });
+        }
+        return { created: true };
+      },
+      catch: (cause) =>
+        new PlatformError({ message: String(cause), step: "host-source" }),
+    });
+  }
+
   async stop(): Promise<void> {
     this.dispatcher?.stop();
     this.gate.stop();
