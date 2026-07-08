@@ -31,7 +31,7 @@ import { oidcRouter } from "./oidc.ts";
 import { ensureSigningKey } from "./oidc-clients.ts";
 import { Dispatcher } from "./crew/dispatcher.ts";
 import { makeContainerRunner } from "./crew/container-runner.ts";
-import { PLAT, PlatformConfig } from "./platform-config.ts";
+import { OPD, PLAT, PlatformConfig } from "./platform-config.ts";
 import { draftIssue } from "./crew/composer.ts";
 import {
   commitFiles,
@@ -58,6 +58,9 @@ export interface PlatformOpts {
   engineSocket?: string;
   /** Where the genesis template content lives (defaults to the repo checkout). */
   genesisDir?: string;
+  /** Called when the platform's own source (plat/opd) changes — the daemon asks
+   *  its supervisor to re-exec from the new source. Absent = no self-upgrade. */
+  onUpgradeRequested?: () => void;
   log?: Log;
 }
 
@@ -320,6 +323,11 @@ export class Platform {
         git.onPush((evt) => {
           if (evt.owner === PLAT.owner && evt.name === PLAT.name)
             void platformConfig.reload();
+          // A merge to the platform's own SOURCE re-execs the daemon from it.
+          if (evt.owner === OPD.owner && evt.name === OPD.name) {
+            log.info("self-upgrade: plat/opd changed — requesting re-exec");
+            opts.onUpgradeRequested?.();
+          }
         });
 
         // The AI build crew. The Claude Code OAuth token is BYO (sk-ant-oat01,

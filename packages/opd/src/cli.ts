@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Result } from "@op/core";
+import { createLog, Result } from "@op/core";
 import { readLineage } from "@op/mitosis";
 import { Platform, type PlatformOpts } from "./platform.ts";
+import { bunSupervisorIo, supervise, UPGRADE_EXIT } from "./supervisor.ts";
 
 function env(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
@@ -45,23 +46,59 @@ function card(p: Platform): void {
 `);
 }
 
+// The daemon: boot, print the card, serve forever. When its own source
+// (plat/opd) changes it asks the supervisor to re-exec by exiting UPGRADE_EXIT;
+// unsupervised, that just exits (the operator restarts). Apps outlive it.
+async function serve(domain: string): Promise<number> {
+  let upgrading = false;
+  let booted: Platform | undefined;
+  const opts: PlatformOpts = {
+    ...optsFromEnv(domain),
+    onUpgradeRequested: () => {
+      if (upgrading) return;
+      upgrading = true;
+      void (async () => {
+        await booted?.stop().catch(() => {});
+        process.exit(UPGRADE_EXIT);
+      })();
+    },
+  };
+  const result = await Platform.up(opts);
+  if (result.status === "error") {
+    console.error(
+      `op serve FAILED [${result.error.step}]: ${result.error.message}`,
+    );
+    return 1;
+  }
+  booted = result.value;
+  card(booted);
+  await new Promise(() => {}); // serve forever
+  return 0;
+}
+
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   const domain = env("DOMAIN", "plat.localtest.me");
 
   switch (cmd) {
     case "up": {
-      const booted = await Platform.up(optsFromEnv(domain));
-      if (booted.status === "error") {
-        console.error(
-          `op up FAILED [${booted.error.step}]: ${booted.error.message}`,
-        );
-        return 1;
+      // Supervised (OP_SRC = a managed clone of plat/opd) → the platform can
+      // re-exec itself from its own source on a merge. Otherwise serve inline
+      // (dev/simple mode, no self-upgrade).
+      const src = process.env["OP_SRC"];
+      if (src && !process.env["OP_SUPERVISED"]) {
+        return await supervise({
+          src,
+          domain,
+          log: createLog("super"),
+          ...bunSupervisorIo(),
+        });
       }
-      card(booted.value);
-      await new Promise(() => {}); // serve forever
-      return 0;
+      return await serve(domain);
     }
+    case "serve":
+      // The daemon proper. Run directly by the supervisor (or by `up` inline).
+      return await serve(domain);
     case "seed": {
       const out =
         rest[0] ?? `seed-${new Date().toISOString().slice(0, 10)}.tar.gz`;
