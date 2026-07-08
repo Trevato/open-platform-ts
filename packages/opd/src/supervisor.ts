@@ -109,11 +109,12 @@ export async function supervise(deps: SupervisorDeps): Promise<number> {
   }
 }
 
-/** Default git/spawn wiring for the real supervisor (Bun subprocesses). */
-export function bunSupervisorIo(): Pick<
-  SupervisorDeps,
-  "spawnDaemon" | "headRef" | "pullLatest" | "resetTo"
-> {
+/** Default git/spawn wiring for the real supervisor (Bun subprocesses).
+ *  `sourceRepo` is the LOCAL bare repo (plat/opd) — the supervisor pulls from
+ *  disk, never the daemon's HTTP endpoint, which is down during the re-exec. */
+export function bunSupervisorIo(
+  sourceRepo: string,
+): Pick<SupervisorDeps, "spawnDaemon" | "headRef" | "pullLatest" | "resetTo"> {
   const git = async (src: string, args: string[]): Promise<string> => {
     const p = Bun.spawn(["git", "-C", src, ...args], {
       stdout: "pipe",
@@ -139,8 +140,10 @@ export function bunSupervisorIo(): Pick<
     },
     headRef: (src) => git(src, ["rev-parse", "HEAD"]),
     pullLatest: async (src) => {
-      await git(src, ["fetch", "origin", "main"]);
-      await git(src, ["reset", "--hard", "origin/main"]);
+      // Fetch from the local bare repo on disk — the daemon (and its git HTTP
+      // server) is stopped during the re-exec, so the endpoint is unreachable.
+      await git(src, ["fetch", sourceRepo, "main"]);
+      await git(src, ["reset", "--hard", "FETCH_HEAD"]);
     },
     resetTo: async (src, ref) => {
       await git(src, ["reset", "--hard", ref]);

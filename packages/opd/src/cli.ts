@@ -87,11 +87,13 @@ async function main(): Promise<number> {
       // (dev/simple mode, no self-upgrade).
       const src = process.env["OP_SRC"];
       if (src && !process.env["OP_SUPERVISED"]) {
+        const root = env("OP_ROOT", join(homedir(), ".op", domain));
+        const sourceRepo = join(root, "repos", "plat", "opd.git");
         return await supervise({
           src,
           domain,
           log: createLog("super"),
-          ...bunSupervisorIo(),
+          ...bunSupervisorIo(sourceRepo),
         });
       }
       return await serve(domain);
