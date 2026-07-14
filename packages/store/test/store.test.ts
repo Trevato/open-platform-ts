@@ -90,6 +90,134 @@ describe("Store", () => {
     s.close();
   });
 
+  test("work items: legal-edge phase machine, CAS claim, derived state", () => {
+    const s = freshStore();
+    s.createRepo("ada", "shop");
+    const item = s.createIssue("ada", "shop", {
+      title: "checkout",
+      body: "",
+      author: "ada",
+      labels: ["agent-work"],
+    });
+    expect(item.phase).toBe("intent");
+
+    s.setWorkPhase("ada", "shop", item.number, "queued");
+    // Claim is a CAS: first wins, second loses cleanly (no throw).
+    expect(s.claimWork("ada", "shop", item.number)).toBe(true);
+    expect(s.claimWork("ada", "shop", item.number)).toBe(false);
+
+    // Illegal jump throws and mutates nothing.
+    expect(() => s.setWorkPhase("ada", "shop", item.number, "shipped")).toThrow(
+      /illegal transition building → shipped/,
+    );
+    expect(s.getIssue("ada", "shop", item.number)?.phase).toBe("building");
+
+    s.attachChange("ada", "shop", item.number, {
+      head: `agent/issue-${item.number}`,
+      base: "main",
+    });
+    s.setWorkPhase("ada", "shop", item.number, "reviewing");
+    expect(s.listOpenChanges().map((w) => w.number)).toEqual([item.number]);
+
+    s.setWorkPhase("ada", "shop", item.number, "reworking");
+    s.setWorkPhase("ada", "shop", item.number, "reviewing");
+    s.setWorkPhase("ada", "shop", item.number, "shipped");
+    s.setChangeState("ada", "shop", item.number, "merged");
+
+    const shipped = s.getIssue("ada", "shop", item.number);
+    expect(shipped?.phase).toBe("shipped");
+    expect(shipped?.state).toBe("closed"); // derived, one write site
+    expect(shipped?.change_state).toBe("merged");
+    // Terminal is terminal.
+    expect(() => s.setWorkPhase("ada", "shop", item.number, "queued")).toThrow(
+      /illegal/,
+    );
+    s.close();
+  });
+
+  test("work items: parked carries a reason; re-queue clears it", () => {
+    const s = freshStore();
+    s.createRepo("ada", "shop");
+    const item = s.createIssue("ada", "shop", {
+      title: "x",
+      body: "",
+      author: "ada",
+      labels: [],
+    });
+    s.setWorkPhase("ada", "shop", item.number, "queued");
+    s.claimWork("ada", "shop", item.number);
+    s.setWorkPhase("ada", "shop", item.number, "parked", {
+      parkedReason: "preview-never-up",
+    });
+    expect(s.getIssue("ada", "shop", item.number)?.parked_reason).toBe(
+      "preview-never-up",
+    );
+    s.setWorkPhase("ada", "shop", item.number, "queued");
+    const requeued = s.getIssue("ada", "shop", item.number);
+    expect(requeued?.phase).toBe("queued");
+    expect(requeued?.parked_reason).toBeNull();
+    s.close();
+  });
+
+  test("work attempts: append-only ledger with monotone numbering", () => {
+    const s = freshStore();
+    s.createRepo("ada", "shop");
+    const item = s.createIssue("ada", "shop", {
+      title: "x",
+      body: "",
+      author: "ada",
+      labels: [],
+    });
+    expect(
+      s.openWorkAttempt("ada", "shop", item.number, { builderCostUsd: 1.42 }),
+    ).toBe(1);
+    s.setAttemptVerdict("ada", "shop", item.number, 1, {
+      verdict: "fail",
+      verdictLine: "FAIL — cart total ignores qty",
+      reviewerCostUsd: 0.31,
+    });
+    expect(s.openWorkAttempt("ada", "shop", item.number)).toBe(2);
+    expect(s.countAttempts("ada", "shop", item.number)).toBe(2);
+    const ledger = s.listAttempts("ada", "shop", item.number);
+    expect(ledger[0]?.verdict).toBe("fail");
+    expect(ledger[0]?.verdict_line).toContain("cart total");
+    expect(ledger[1]?.verdict).toBeNull();
+    s.close();
+  });
+
+  test("work deps: cross-repo blockers gate until terminal", () => {
+    const s = freshStore();
+    s.createRepo("ada", "website");
+    s.createRepo("ada", "shop");
+    const site = s.createIssue("ada", "website", {
+      title: "storefront link",
+      body: "",
+      author: "ada",
+      labels: [],
+    });
+    const shop = s.createIssue("ada", "shop", {
+      title: "catalog api",
+      body: "",
+      author: "ada",
+      labels: [],
+    });
+    const siteRef = { owner: "ada", repo: "website", number: site.number };
+    const shopRef = { owner: "ada", repo: "shop", number: shop.number };
+    s.addWorkDep(siteRef, shopRef);
+    expect(s.openWorkBlockers("ada", "website", site.number)).toHaveLength(1);
+
+    // A parked blocker still blocks; only terminal phases unblock.
+    s.setWorkPhase("ada", "shop", shop.number, "queued");
+    s.claimWork("ada", "shop", shop.number);
+    s.setWorkPhase("ada", "shop", shop.number, "parked", {
+      parkedReason: "rework-exhausted",
+    });
+    expect(s.openWorkBlockers("ada", "website", site.number)).toHaveLength(1);
+    s.setWorkPhase("ada", "shop", shop.number, "closed");
+    expect(s.openWorkBlockers("ada", "website", site.number)).toHaveLength(0);
+    s.close();
+  });
+
   test("app_ports: sticky allocation, binding updates, release on removal", () => {
     const s = freshStore();
     const range: [number, number] = [25500, 25502];

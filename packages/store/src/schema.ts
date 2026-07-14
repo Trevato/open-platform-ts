@@ -172,4 +172,84 @@ export const MIGRATIONS: readonly string[] = [
     UNIQUE(owner, app, container_port)
   );
   `,
+  `
+  -- Work items: the issue IS the unit of work; the PR collapses into change
+  -- fields on the item plus an append-only attempts ledger. pull_requests is
+  -- frozen read-only history — no new PR numbers are ever minted.
+  --
+  -- phase is the single source of process truth (labels become taxonomy only):
+  --   intent → queued → building → reviewing → (reworking ↔ reviewing)*
+  --     → shipped | parked | closed
+  -- state stays as the derived open/closed mirror for old readers.
+  ALTER TABLE issues ADD COLUMN phase TEXT NOT NULL DEFAULT 'intent';
+  ALTER TABLE issues ADD COLUMN head_ref TEXT;
+  ALTER TABLE issues ADD COLUMN base_ref TEXT;
+  ALTER TABLE issues ADD COLUMN change_state TEXT;
+  ALTER TABLE issues ADD COLUMN parked_reason TEXT;
+  CREATE INDEX issues_phase ON issues (phase);
+
+  CREATE TABLE work_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    head_sha TEXT,
+    builder_cost_usd REAL,
+    verdict TEXT,
+    verdict_line TEXT,
+    reviewer_cost_usd REAL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (owner, repo, number, attempt)
+  );
+
+  -- Cross-repo work dependencies. Full coordinates on both sides so lifting
+  -- the same-owner rule (enforced in forge) is a one-line change, never a
+  -- migration. issue_deps is frozen (same-repo, unused live).
+  CREATE TABLE work_deps (
+    owner TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
+    on_owner TEXT NOT NULL, on_repo TEXT NOT NULL, on_number INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (owner, repo, number, on_owner, on_repo, on_number)
+  );
+  CREATE INDEX work_deps_item ON work_deps (owner, repo, number);
+
+  -- Backfill. 1) Stamp change fields onto issues from crew PRs (branch
+  -- convention agent/issue-N was the only link between the two tables).
+  UPDATE issues SET
+    head_ref = (SELECT pr.head_ref FROM pull_requests pr
+      WHERE pr.owner = issues.owner AND pr.repo = issues.repo
+        AND pr.head_ref = 'agent/issue-' || issues.number),
+    base_ref = (SELECT pr.base_ref FROM pull_requests pr
+      WHERE pr.owner = issues.owner AND pr.repo = issues.repo
+        AND pr.head_ref = 'agent/issue-' || issues.number),
+    change_state = (SELECT CASE pr.state WHEN 'merged' THEN 'merged'
+        WHEN 'open' THEN 'open' ELSE 'closed' END FROM pull_requests pr
+      WHERE pr.owner = issues.owner AND pr.repo = issues.repo
+        AND pr.head_ref = 'agent/issue-' || issues.number)
+  WHERE EXISTS (SELECT 1 FROM pull_requests pr
+      WHERE pr.owner = issues.owner AND pr.repo = issues.repo
+        AND pr.head_ref = 'agent/issue-' || issues.number);
+
+  -- 2) Labels → phase. Active phases park as 'migrated', never guessed.
+  UPDATE issues SET phase = CASE
+    WHEN instr(',' || labels || ',', ',agent-shipped,') > 0 THEN 'shipped'
+    WHEN instr(',' || labels || ',', ',agent-failed,') > 0
+      OR instr(',' || labels || ',', ',agent-review-failed,') > 0 THEN 'parked'
+    WHEN instr(',' || labels || ',', ',agent-building,') > 0
+      OR instr(',' || labels || ',', ',agent-reviewing,') > 0
+      OR instr(',' || labels || ',', ',agent-reworking,') > 0 THEN 'parked'
+    WHEN state = 'closed' THEN 'closed'
+    WHEN instr(',' || labels || ',', ',agent-work,') > 0 THEN 'queued'
+    ELSE 'intent' END;
+  UPDATE issues SET parked_reason = 'migrated' WHERE phase = 'parked';
+
+  -- 3) Strip dead phase labels; agent-work survives as the enqueue verb.
+  UPDATE issues SET labels = trim(replace(replace(replace(replace(replace(replace(
+    ',' || labels || ',',
+    ',agent-building,', ','), ',agent-reviewing,', ','), ',agent-reworking,', ','),
+    ',agent-shipped,', ','), ',agent-failed,', ','), ',agent-review-failed,', ','), ',');
+
+  -- 4) issue_deps → work_deps (same-repo edges, table unused on live).
+  INSERT OR IGNORE INTO work_deps (owner, repo, number, on_owner, on_repo, on_number, created_at)
+    SELECT owner, repo, number, owner, repo, blocked_by, created_at FROM issue_deps;
+  `,
 ];

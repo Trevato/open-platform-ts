@@ -112,8 +112,62 @@ export interface IssueRow {
   title: string;
   body: string;
   state: string;
-  labels: string; // comma-separated
+  labels: string; // comma-separated (taxonomy only; phase is process truth)
   author: string;
+  created_at: number;
+  /** Work-item lifecycle. state is derived: closed ⇔ phase ∈ {shipped, closed}. */
+  phase: WorkPhase;
+  head_ref: string | null;
+  base_ref: string | null;
+  change_state: string | null; // 'open' | 'merged' | 'closed' | null
+  parked_reason: string | null;
+}
+
+export type WorkPhase =
+  | "intent"
+  | "queued"
+  | "building"
+  | "reviewing"
+  | "reworking"
+  | "shipped"
+  | "parked"
+  | "closed";
+
+// The legal-edge table — the single enforcement point for process state,
+// mirroring admitSpec's role: an illegal transition throws and the mutation
+// never happened. Keys are targets; values are the phases allowed to move there.
+const WORK_EDGES: Record<WorkPhase, WorkPhase[]> = {
+  intent: [],
+  queued: ["intent", "parked"],
+  building: ["queued"],
+  reviewing: ["building", "reworking"],
+  reworking: ["reviewing"],
+  shipped: ["reviewing", "reworking", "parked"],
+  parked: ["building", "reviewing", "reworking"],
+  closed: ["intent", "queued", "building", "reviewing", "reworking", "parked"],
+};
+
+export interface WorkAttemptRow {
+  id: number;
+  owner: string;
+  repo: string;
+  number: number;
+  attempt: number;
+  head_sha: string | null;
+  builder_cost_usd: number | null;
+  verdict: string | null;
+  verdict_line: string | null;
+  reviewer_cost_usd: number | null;
+  created_at: number;
+}
+
+export interface WorkDepRow {
+  owner: string;
+  repo: string;
+  number: number;
+  on_owner: string;
+  on_repo: string;
+  on_number: number;
   created_at: number;
 }
 
@@ -727,6 +781,11 @@ export class Store {
         labels: fields.labels.join(","),
         author: fields.author,
         created_at: Date.now(),
+        phase: "intent",
+        head_ref: null,
+        base_ref: null,
+        change_state: null,
+        parked_reason: null,
       };
       this.db.run(
         `INSERT INTO issues (id, owner, repo, number, title, body, state, labels, author, created_at)
@@ -890,6 +949,245 @@ export class Store {
         IssueCommentRow,
         [string, string, number]
       >("SELECT * FROM issue_comments WHERE owner = ? AND repo = ? AND number = ? ORDER BY rowid ASC")
+      .all(owner, repo, number);
+  }
+
+  // ── work items (phase machine + attempts ledger over issues) ────────────
+  /** Transition a work item. CAS against the legal-edge table: the UPDATE
+   *  only fires from a phase allowed to reach `to`, so a concurrent mover
+   *  loses cleanly. Illegal/late transitions throw — the mutation never
+   *  happened. The old open/closed `state` is maintained here, its one write
+   *  site, so pre-work-item readers keep working. */
+  setWorkPhase(
+    owner: string,
+    repo: string,
+    number: number,
+    to: WorkPhase,
+    opts?: { parkedReason?: string },
+  ): void {
+    const from = WORK_EDGES[to];
+    if (from.length === 0)
+      throw new Error(`no legal transition into phase '${to}'`);
+    const derived = to === "shipped" || to === "closed" ? "closed" : "open";
+    const changed = this.db.run(
+      `UPDATE issues SET phase = ?, state = ?, parked_reason = ?
+       WHERE owner = ? AND repo = ? AND number = ?
+         AND phase IN (${from.map(() => "?").join(", ")})`,
+      [
+        to,
+        derived,
+        to === "parked" ? (opts?.parkedReason ?? null) : null,
+        owner,
+        repo,
+        number,
+        ...from,
+      ],
+    ).changes;
+    if (changed !== 1) {
+      const current = this.getIssue(owner, repo, number);
+      throw new Error(
+        current
+          ? `illegal transition ${current.phase} → ${to} for ${owner}/${repo}#${number}`
+          : `no such work item: ${owner}/${repo}#${number}`,
+      );
+    }
+  }
+
+  /** Claim a queued item for building. The CAS makes double-claims
+   *  structurally impossible; losing the race is normal, not an error. */
+  claimWork(owner: string, repo: string, number: number): boolean {
+    return (
+      this.db.run(
+        `UPDATE issues SET phase = 'building'
+         WHERE owner = ? AND repo = ? AND number = ? AND phase = 'queued'`,
+        [owner, repo, number],
+      ).changes === 1
+    );
+  }
+
+  /** Attach the (single, ever) change to a work item. Idempotent per item:
+   *  rework recommits on the same branch. */
+  attachChange(
+    owner: string,
+    repo: string,
+    number: number,
+    change: { head: string; base: string },
+  ): void {
+    this.db.run(
+      `UPDATE issues SET head_ref = ?, base_ref = ?, change_state = 'open'
+       WHERE owner = ? AND repo = ? AND number = ?`,
+      [change.head, change.base, owner, repo, number],
+    );
+  }
+
+  setChangeState(
+    owner: string,
+    repo: string,
+    number: number,
+    state: "open" | "merged" | "closed",
+  ): void {
+    this.db.run(
+      `UPDATE issues SET change_state = ? WHERE owner = ? AND repo = ? AND number = ?`,
+      [state, owner, repo, number],
+    );
+  }
+
+  /** Work items with a live change — the reconciler's preview work-list. */
+  listOpenChanges(): IssueRow[] {
+    return this.db
+      .query<IssueRow, []>("SELECT * FROM issues WHERE change_state = 'open'")
+      .all();
+  }
+
+  listWorkByPhase(phase: WorkPhase): IssueRow[] {
+    return this.db
+      .query<
+        IssueRow,
+        [string]
+      >("SELECT * FROM issues WHERE phase = ? ORDER BY created_at")
+      .all(phase);
+  }
+
+  /** Open a new attempt row (append-only ledger). Returns the attempt number. */
+  openWorkAttempt(
+    owner: string,
+    repo: string,
+    number: number,
+    fields?: { headSha?: string; builderCostUsd?: number },
+  ): number {
+    return this.db.transaction(() => {
+      const max =
+        this.db
+          .query<
+            { n: number | null },
+            [string, string, number]
+          >("SELECT MAX(attempt) AS n FROM work_attempts WHERE owner = ? AND repo = ? AND number = ?")
+          .get(owner, repo, number)?.n ?? 0;
+      const attempt = max + 1;
+      this.db.run(
+        `INSERT INTO work_attempts (owner, repo, number, attempt, head_sha, builder_cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          owner,
+          repo,
+          number,
+          attempt,
+          fields?.headSha ?? null,
+          fields?.builderCostUsd ?? null,
+          Date.now(),
+        ],
+      );
+      return attempt;
+    })();
+  }
+
+  setAttemptVerdict(
+    owner: string,
+    repo: string,
+    number: number,
+    attempt: number,
+    fields: {
+      verdict: string;
+      verdictLine?: string;
+      reviewerCostUsd?: number;
+      headSha?: string;
+    },
+  ): void {
+    this.db.run(
+      `UPDATE work_attempts SET verdict = ?, verdict_line = ?,
+         reviewer_cost_usd = COALESCE(?, reviewer_cost_usd),
+         head_sha = COALESCE(?, head_sha)
+       WHERE owner = ? AND repo = ? AND number = ? AND attempt = ?`,
+      [
+        fields.verdict,
+        fields.verdictLine ?? null,
+        fields.reviewerCostUsd ?? null,
+        fields.headSha ?? null,
+        owner,
+        repo,
+        number,
+        attempt,
+      ],
+    );
+  }
+
+  countAttempts(owner: string, repo: string, number: number): number {
+    return (
+      this.db
+        .query<
+          { n: number },
+          [string, string, number]
+        >("SELECT COUNT(*) AS n FROM work_attempts WHERE owner = ? AND repo = ? AND number = ?")
+        .get(owner, repo, number)?.n ?? 0
+    );
+  }
+
+  listAttempts(owner: string, repo: string, number: number): WorkAttemptRow[] {
+    return this.db
+      .query<
+        WorkAttemptRow,
+        [string, string, number]
+      >("SELECT * FROM work_attempts WHERE owner = ? AND repo = ? AND number = ? ORDER BY attempt")
+      .all(owner, repo, number);
+  }
+
+  // ── work dependencies (cross-repo; same-owner enforced in forge) ────────
+  addWorkDep(
+    item: { owner: string; repo: string; number: number },
+    on: { owner: string; repo: string; number: number },
+  ): void {
+    this.db.run(
+      `INSERT INTO work_deps (owner, repo, number, on_owner, on_repo, on_number, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+      [
+        item.owner,
+        item.repo,
+        item.number,
+        on.owner,
+        on.repo,
+        on.number,
+        Date.now(),
+      ],
+    );
+  }
+
+  removeWorkDep(
+    item: { owner: string; repo: string; number: number },
+    on: { owner: string; repo: string; number: number },
+  ): void {
+    this.db.run(
+      `DELETE FROM work_deps WHERE owner = ? AND repo = ? AND number = ?
+         AND on_owner = ? AND on_repo = ? AND on_number = ?`,
+      [item.owner, item.repo, item.number, on.owner, on.repo, on.number],
+    );
+  }
+
+  listWorkDeps(owner: string, repo: string, number: number): WorkDepRow[] {
+    return this.db
+      .query<
+        WorkDepRow,
+        [string, string, number]
+      >("SELECT * FROM work_deps WHERE owner = ? AND repo = ? AND number = ? ORDER BY on_owner, on_repo, on_number")
+      .all(owner, repo, number);
+  }
+
+  /** Blockers that still gate work: a blocker counts as open until its phase
+   *  is terminal. */
+  openWorkBlockers(
+    owner: string,
+    repo: string,
+    number: number,
+  ): Array<WorkDepRow & { phase: WorkPhase }> {
+    return this.db
+      .query<WorkDepRow & { phase: WorkPhase }, [string, string, number]>(
+        `SELECT d.*, i.phase FROM work_deps d
+         JOIN issues i
+           ON i.owner = d.on_owner AND i.repo = d.on_repo AND i.number = d.on_number
+         WHERE d.owner = ? AND d.repo = ? AND d.number = ?
+           AND i.phase NOT IN ('shipped', 'closed')
+         ORDER BY d.on_owner, d.on_repo, d.on_number`,
+      )
       .all(owner, repo, number);
   }
 }
