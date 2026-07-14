@@ -275,6 +275,63 @@ export async function listSnapshots(
   });
 }
 
+/**
+ * Ingest an app's data from an EXTERNAL directory (an app-seed's unpacked data)
+ * into this platform's live dir for owner/app. Refuses to clobber an existing
+ * live dir, verifies the imported db opens cleanly (integrity_check), and sets
+ * the container-writable modes. The source is a snapshot-shaped dir: app.db
+ * (+ optional files/), no live -wal/-shm.
+ */
+export async function importDataDir(
+  sd: StateDir,
+  owner: string,
+  app: string,
+  srcDir: string,
+): Promise<Result<void, DataError>> {
+  const op = "importDataDir";
+  if (!isValidName(owner) || !isValidName(app)) return invalid(op, owner, app);
+  if (!existsSync(srcDir))
+    return Result.err(
+      new DataError({ message: `no source data dir: ${srcDir}`, op }),
+    );
+  const live = liveDir(sd, owner, app);
+  if (existsSync(live))
+    return Result.err(
+      new DataError({
+        message: `data dir already exists: ${owner}/${app}`,
+        op,
+      }),
+    );
+  return Result.tryPromise({
+    try: async () => {
+      await mkdir(join(live, ".."), { recursive: true });
+      await cp(srcDir, live, { recursive: true });
+      // A migrated db must open cleanly here or the import is not trustworthy.
+      const dbFile = join(live, "app.db");
+      if (existsSync(dbFile)) {
+        const failure = verifySnapshotDb(dbFile);
+        if (failure !== null) {
+          await rm(live, { recursive: true, force: true });
+          throw new DataError({
+            message: `imported db failed verification: ${failure}`,
+            op,
+          });
+        }
+      } else {
+        // No db in the artifact — still guarantee the standard layout exists.
+        await mkdir(join(live, "files"), { recursive: true });
+      }
+      await chmod(live, 0o777);
+      const files = join(live, "files");
+      if (existsSync(files)) await chmod(files, 0o777);
+    },
+    catch: (cause) =>
+      cause instanceof DataError
+        ? cause
+        : new DataError({ message: String(cause), op }),
+  });
+}
+
 /** Replaces the live data dir with the snapshot (app must be stopped by caller). */
 export async function restore(
   sd: StateDir,

@@ -138,6 +138,73 @@ async function main(): Promise<number> {
       await new Promise(() => {});
       return 0;
     }
+    case "app": {
+      // op app export <owner>/<app> [out.tar.gz]
+      // op app import <seed.tar.gz> [owner/app]
+      const sub = rest[0];
+      if (sub === "export") {
+        const target = rest[1];
+        if (!target || !target.includes("/")) {
+          console.error("usage: op app export <owner>/<app> [out.tar.gz]");
+          return 2;
+        }
+        const [owner, app] = target.split("/") as [string, string];
+        const out =
+          rest[2] ??
+          `${owner}-${app}-${new Date().toISOString().slice(0, 10)}.tar.gz`;
+        const booted = await Platform.up(optsFromEnv(domain));
+        if (booted.status === "error") {
+          console.error(`op app export FAILED: ${booted.error.message}`);
+          return 1;
+        }
+        const exported = await booted.value.appExport(owner, app, out);
+        await booted.value.stop();
+        if (exported.status === "error") {
+          console.error(
+            `op app export FAILED [${exported.error.step}]: ${exported.error.message}`,
+          );
+          return 1;
+        }
+        console.log(
+          `app seed written: ${out} — hand it to a client; they run 'op app import ${out}' on their platform`,
+        );
+        return 0;
+      }
+      if (sub === "import") {
+        const seedFile = rest[1];
+        if (!seedFile) {
+          console.error("usage: op app import <seed.tar.gz> [owner/app]");
+          return 2;
+        }
+        const remap = rest[2];
+        const opts =
+          remap && remap.includes("/")
+            ? {
+                owner: remap.split("/")[0]!,
+                app: remap.split("/")[1]!,
+              }
+            : {};
+        const booted = await Platform.up(optsFromEnv(domain));
+        if (booted.status === "error") {
+          console.error(`op app import FAILED: ${booted.error.message}`);
+          return 1;
+        }
+        const imported = await booted.value.appImport(seedFile, opts);
+        await booted.value.stop();
+        if (imported.status === "error") {
+          console.error(
+            `op app import FAILED [${imported.error.step}]: ${imported.error.message}`,
+          );
+          return 1;
+        }
+        console.log(
+          `app imported: ${imported.value.owner}/${imported.value.app} — deploying now; 'op up' to serve it`,
+        );
+        return 0;
+      }
+      console.error("usage: op app export|import …");
+      return 2;
+    }
     case "host-source": {
       const srcDir =
         rest[0] ??
@@ -174,7 +241,7 @@ async function main(): Promise<number> {
     }
     default:
       console.log(
-        "op — Open Platform\n\n  op up                 boot (or resume) the platform\n  op seed [out]         export a seed of this platform\n  op germinate          grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op host-source [dir]  publish the platform's own source into plat/opd (OP_SRC=)\n  op lineage            print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
+        "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (OP_SRC=)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
       );
       return cmd ? 2 : 0;
   }

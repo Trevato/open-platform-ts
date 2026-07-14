@@ -6,11 +6,11 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { Result } from "@op/core";
+import { createLog, Result } from "@op/core";
 import { openAll, verifyAllSealed, type SecretsFile } from "@op/secrets";
 import { readLineage } from "@op/mitosis";
 import { resolveEngineSocket } from "@op/engine";
-import { Platform, readSecretsFile, SYS } from "@op/opd";
+import { Platform, PlatformConfig, readSecretsFile, SYS } from "@op/opd";
 
 // Every historical version of the daughter's sealed secrets, across ALL refs
 // and history — the surface a public-read repo exposes to a key-compromise
@@ -344,6 +344,14 @@ describe.skipIf(!sock)("M1: full loop under 60s", () => {
       expect(lineage.join("\n")).toContain(
         "d1.localtest.me germinated-from plat.localtest.me",
       );
+
+      // CREW LIVENESS: the genome must carry plat/platform (prompts + config)
+      // or every daughter's build crew is dead on arrival.
+      const daughterCfg = new PlatformConfig(daughter.git, createLog("e2e"));
+      const builderAgent = await daughterCfg.loadAgent("builder");
+      expect(builderAgent.status).toBe("ok");
+      await daughterCfg.reload(); // platform.json admits (crew.model et al.)
+      expect(daughterCfg.get().crew.model).toBe("claude-sonnet-5");
     });
 
     // 10. daughter runs the same journey — warm layer cache does the rest.

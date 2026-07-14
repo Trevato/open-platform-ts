@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createLog,
+  isReservedAppName,
+  isValidName,
   newId,
   Result,
   stateDir,
@@ -10,11 +12,19 @@ import {
   type Log,
   type StateDir,
 } from "@op/core";
+import { importDataDir, provisionDataDir, snapshot } from "@op/data";
 import { Engine } from "@op/engine";
 import { Forge, forgeRouter } from "@op/forge";
 import { ensureCa, Gate } from "@op/gate";
 import { GitHost } from "@op/git";
-import { extractSeed, recordLineage, writeSeed } from "@op/mitosis";
+import {
+  extractAppSeed,
+  extractSeed,
+  recordLineage,
+  writeAppSeed,
+  writeSeed,
+  type AppSeedManifest,
+} from "@op/mitosis";
 import {
   loadKeyFile,
   mintKey,
@@ -34,12 +44,15 @@ import { makeContainerRunner } from "./crew/container-runner.ts";
 import { OPD, PLAT, PlatformConfig } from "./platform-config.ts";
 import { draftIssue } from "./crew/composer.ts";
 import {
+  appSpecPath,
   commitFiles,
+  readAppSpecs,
   readSecretsFile,
   SECRETS_PATH,
   SYS,
   TEMPLATE,
 } from "./gitops.ts";
+import type { AppSpec } from "./policy.ts";
 import { run } from "./proc.ts";
 import { Reconciler } from "./reconcile.ts";
 
@@ -184,6 +197,26 @@ export class Platform {
           );
           await rm(work, { recursive: true, force: true });
           freshAdminPassword = regenerated.plain["ADMIN_PASSWORD"];
+        }
+
+        // Backstop: a germinated boot from a seed that predates PLAT-in-genome
+        // has no plat/platform repo — and without it the crew is dead on
+        // arrival (loadAgent reads crew/<role>/ from it). Re-seed from genesis.
+        if (
+          !(await Bun.file(
+            join(sd.reposDir, PLAT.owner, `${PLAT.name}.git`, "HEAD"),
+          ).exists())
+        ) {
+          const genesisRoot = opts.genesisDir ?? defaultGenesisDir();
+          Result.unwrap(await git.initBareRepo(PLAT.owner, PLAT.name));
+          Result.unwrap(
+            await git.seedRepoFromDir(
+              PLAT.owner,
+              PLAT.name,
+              join(genesisRoot, "platform"),
+              "genesis",
+            ),
+          );
         }
 
         // System repos need store rows on genesis AND germinated boots
@@ -457,21 +490,18 @@ export class Platform {
           await run(["git", "init", "-q", "--bare", "-b", "main", tmpGitops]);
           await run(["git", "push", "-q", tmpGitops, "seed-root:main"], strip);
 
-          const templateBare = join(
-            this.sd.reposDir,
-            TEMPLATE.owner,
-            `${TEMPLATE.name}.git`,
-          );
-          await mkdir(join(tmpSd.reposDir, TEMPLATE.owner), {
-            recursive: true,
-          });
-          await cp(
-            templateBare,
-            join(tmpSd.reposDir, TEMPLATE.owner, `${TEMPLATE.name}.git`),
-            {
+          // plat/app-template and plat/platform ship as-is: full history, no
+          // sealed material lives in either (secrets are sys/gitops-only, and
+          // the seed strips those above). Carrying plat/platform is what makes
+          // a daughter's crew live — prompts + platform.json (crew.model et
+          // al.) inherit from the parent, not from a stale genesis.
+          for (const sys of [TEMPLATE, PLAT]) {
+            const bare = join(this.sd.reposDir, sys.owner, `${sys.name}.git`);
+            await mkdir(join(tmpSd.reposDir, sys.owner), { recursive: true });
+            await cp(bare, join(tmpSd.reposDir, sys.owner, `${sys.name}.git`), {
               recursive: true,
-            },
-          );
+            });
+          }
 
           const tmpGit = new GitHost(tmpSd, { log: this.log });
           Result.unwrap(
@@ -479,7 +509,7 @@ export class Platform {
               outFile,
               domain: this.domain,
               recipient: this.key.recipient,
-              repos: [SYS, TEMPLATE],
+              repos: [SYS, TEMPLATE, PLAT],
             }),
           );
         } finally {
@@ -488,6 +518,129 @@ export class Platform {
       },
       catch: (cause) =>
         new PlatformError({ message: String(cause), step: "seed" }),
+    });
+  }
+
+  /**
+   * Export ONE app as a portable artifact: its repo (full history), a fresh
+   * verified data snapshot, and its app.json. A different sovereign platform
+   * ingests it with appImport. No key or platform secret travels — the app's
+   * OIDC client + APP_SECRET are re-minted at deploy on the target.
+   */
+  async appExport(
+    owner: string,
+    app: string,
+    outFile: string,
+  ): Promise<Result<AppSeedManifest, PlatformError>> {
+    return Result.tryPromise({
+      try: async () => {
+        const specs = await readAppSpecs(this.git, this.domain);
+        if (specs.status === "error") throw specs.error;
+        const spec = specs.value.find(
+          (s) => s.owner === owner && s.app === app,
+        );
+        if (!spec) throw new Error(`no such app: ${owner}/${app}`);
+
+        // A fresh, integrity-checked snapshot is the app's data-of-record for
+        // the migration. If the app has never stored data, ship none.
+        let dataDir: string | undefined;
+        if (spec.data) {
+          const snap = await snapshot(this.sd, owner, app);
+          if (snap.status === "ok") dataDir = snap.value.dir;
+        }
+
+        const written = await writeAppSeed(this.git, {
+          outFile,
+          owner,
+          app,
+          spec: spec as unknown as Record<string, unknown>,
+          domain: this.domain,
+          ...(dataDir ? { dataDir } : {}),
+        });
+        if (written.status === "error") throw written.error;
+        this.log.info("app exported", { owner, app, outFile });
+        return written.value;
+      },
+      catch: (cause) =>
+        new PlatformError({ message: String(cause), step: "appExport" }),
+    });
+  }
+
+  /**
+   * Ingest an app seed produced by another platform. Restores the repo, lays
+   * down its data, and commits a remapped app.json so the reconciler deploys
+   * it here. owner/name may be remapped for the target namespace.
+   */
+  async appImport(
+    seedFile: string,
+    opts: { owner?: string; app?: string } = {},
+  ): Promise<Result<{ owner: string; app: string }, PlatformError>> {
+    return Result.tryPromise({
+      try: async () => {
+        const work = await mkdtemp(join(tmpdir(), "op-appimport-"));
+        try {
+          const extracted = await extractAppSeed(seedFile, work);
+          if (extracted.status === "error") throw extracted.error;
+          const { manifest, dataDir } = extracted.value;
+
+          const owner = opts.owner ?? manifest.owner;
+          const app = opts.app ?? manifest.app;
+          if (!isValidName(owner) || !isValidName(app))
+            throw new Error(`invalid target: ${owner}/${app}`);
+          if (isReservedAppName(app)) throw new Error(`'${app}' is reserved`);
+          if (this.store.getRepo(owner, app))
+            throw new Error(`app already exists here: ${owner}/${app}`);
+
+          // Restore the repo (bundle → bare) and register its store row.
+          const restored = await this.git.restoreFromBundle(
+            extracted.value.bundlePath,
+            owner,
+            app,
+          );
+          if (restored.status === "error") throw restored.error;
+          if (!this.store.getRepo(owner, app))
+            this.store.createRepo(owner, app);
+
+          // Lay down the app's data, then verify it opens cleanly here.
+          if (dataDir) {
+            const imported = await importDataDir(this.sd, owner, app, dataDir);
+            if (imported.status === "error") throw imported.error;
+          } else {
+            await provisionDataDir(this.sd, owner, app);
+          }
+
+          // Remap the spec to the target namespace and commit it — admitSpec on
+          // the reconcile side fails closed if the migrated spec is malformed.
+          const srcSpec = manifest.spec as unknown as AppSpec;
+          const spec: AppSpec = {
+            owner,
+            app,
+            repo: { owner, name: app },
+            ref: srcSpec.ref ?? "main",
+            containerPort: srcSpec.containerPort ?? 8080,
+            data: srcSpec.data ?? true,
+          };
+          const committed = await commitFiles(
+            this.sd,
+            SYS,
+            { [appSpecPath(owner, app)]: JSON.stringify(spec, null, 2) },
+            `apps: import ${owner}/${app} (from ${manifest.createdFrom})`,
+          );
+          if (committed.status === "error") throw committed.error;
+
+          void this.reconciler.kickAll();
+          this.log.info("app imported", {
+            owner,
+            app,
+            from: manifest.createdFrom,
+          });
+          return { owner, app };
+        } finally {
+          await rm(work, { recursive: true, force: true });
+        }
+      },
+      catch: (cause) =>
+        new PlatformError({ message: String(cause), step: "appImport" }),
     });
   }
 
