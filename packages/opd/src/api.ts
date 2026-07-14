@@ -11,6 +11,80 @@ import type { Reconciler } from "./reconcile.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
+// Derive a short, valid app name from a plain-English workflow description, so
+// a non-technical user never has to "name an app". Takes the first couple of
+// content words (dropping filler), slugifies, and clamps to the DNS-safe
+// grammar. Falls back to "tool" when nothing usable survives; the caller
+// de-duplicates against existing apps.
+const NAME_STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "i",
+  "my",
+  "we",
+  "our",
+  "to",
+  "for",
+  "of",
+  "and",
+  "in",
+  "on",
+  "with",
+  "that",
+  "this",
+  "some",
+  "keep",
+  "track",
+  "tracking",
+  "manage",
+  "managing",
+  "list",
+  "log",
+  "logging",
+  "tool",
+  "app",
+  "simple",
+  "record",
+  "records",
+  "recording",
+  "want",
+  "need",
+  "handle",
+  "handling",
+  "do",
+]);
+function deriveAppName(description: string): string {
+  const words = description
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, " ")
+    .split(/[\s-]+/)
+    .filter((w) => w.length > 1 && !NAME_STOPWORDS.has(w));
+  const picked = words.slice(0, 2).join("-").slice(0, 30);
+  const cleaned = picked.replace(/^-+|-+$/g, "").replace(/-{2,}/g, "-");
+  return cleaned && isValidName(cleaned) && !isReservedAppName(cleaned)
+    ? cleaned
+    : "tool";
+}
+
+// Derive an app name from a clone URL: last path segment, minus a trailing
+// ".git", lowercased. Non-name chars become hyphens so the caller's isValidName
+// check is the single source of truth on what's acceptable.
+function repoNameFromUrl(url: string): string {
+  let last = url;
+  try {
+    last = new URL(url).pathname;
+  } catch {
+    /* fall through: treat the raw string's tail as the name */
+  }
+  const seg = last.split("/").filter(Boolean).pop() ?? "";
+  return seg
+    .replace(/\.git$/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export interface ApiDeps {
   sd: StateDir;
   store: Store;
@@ -58,6 +132,7 @@ export function apiRouter(
       if (!user) return json({ error: "unauthorized" }, 401);
       const body = (await req.json().catch(() => null)) as {
         name?: string;
+        owner?: string;
       } | null;
       const name = body?.name;
       if (!name || !isValidName(name))
@@ -69,8 +144,18 @@ export function apiRouter(
           },
           400,
         );
+      // An app may be owned by the user or by an org they belong to.
+      // createFromTemplate re-checks membership; this is the fast, clear reject.
+      const owner = body?.owner ?? user.username;
+      if (!deps.forge.canWriteOwner(user, owner))
+        return json({ error: `not a member of '${owner}'` }, 403);
 
-      const repo = await deps.forge.createFromTemplate(user, TEMPLATE, name);
+      const repo = await deps.forge.createFromTemplate(
+        user,
+        TEMPLATE,
+        name,
+        owner,
+      );
       if (repo.status === "error") {
         return json(
           { error: repo.error.message },
@@ -79,9 +164,9 @@ export function apiRouter(
       }
 
       const spec: AppSpec = {
-        owner: user.username,
+        owner,
         app: name,
-        repo: { owner: user.username, name },
+        repo: { owner, name },
         ref: "main",
         containerPort: 8080,
         data: true,
@@ -89,8 +174,8 @@ export function apiRouter(
       const committed = await commitFiles(
         deps.sd,
         { owner: "sys", name: "gitops" },
-        { [appSpecPath(user.username, name)]: JSON.stringify(spec, null, 2) },
-        `apps: register ${user.username}/${name}`,
+        { [appSpecPath(owner, name)]: JSON.stringify(spec, null, 2) },
+        `apps: register ${owner}/${name}`,
       );
       if (committed.status === "error")
         return json({ error: committed.error.message }, 500);
@@ -99,15 +184,250 @@ export function apiRouter(
       void deps.reconciler.kickAll();
       return json(
         {
-          owner: user.username,
+          owner,
           app: name,
           host: hostFor(spec, deps.domain),
           // Honor the port the client actually reached us on (local high-port
           // dev vs a real :443 deploy) — the domain alone loses it.
-          cloneUrl: `https://${url.host}/${user.username}/${name}.git`,
+          cloneUrl: `https://${url.host}/${owner}/${name}.git`,
         },
         201,
       );
+    }
+
+    // POST /api/v1/onramp {description, owner?, name?} — the one-motion start
+    // for a non-technical user: describe a workflow in plain English and get a
+    // named, deployed app PLUS a filed first build, in a single call. Removes
+    // the "name an app, then separately describe a feature" two-step.
+    if (req.method === "POST" && path === "/api/v1/onramp") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const body = (await req.json().catch(() => null)) as {
+        description?: string;
+        owner?: string;
+        name?: string;
+      } | null;
+      const description = body?.description?.trim();
+      if (!description) return json({ error: "description required" }, 400);
+      const owner = body?.owner ?? user.username;
+      if (!deps.forge.canWriteOwner(user, owner))
+        return json({ error: `not a member of '${owner}'` }, 403);
+
+      // Name it FOR them: an explicit name wins; otherwise derive from the
+      // description and de-duplicate against the owner's existing apps.
+      let name = body?.name
+        ? body.name.toLowerCase()
+        : deriveAppName(description);
+      if (!isValidName(name) || isReservedAppName(name))
+        return json({ error: `could not derive a valid app name` }, 400);
+      if (!body?.name) {
+        const taken = new Set(
+          deps.store.listReposByOwner(owner).map((r) => r.name),
+        );
+        if (taken.has(name)) {
+          let n = 2;
+          while (taken.has(`${name}-${n}`) && n < 100) n++;
+          name = `${name}-${n}`;
+        }
+      }
+
+      const repo = await deps.forge.createFromTemplate(
+        user,
+        TEMPLATE,
+        name,
+        owner,
+      );
+      if (repo.status === "error")
+        return json(
+          { error: repo.error.message },
+          repo.error.code === "conflict" ? 409 : 400,
+        );
+
+      const spec: AppSpec = {
+        owner,
+        app: name,
+        repo: { owner, name },
+        ref: "main",
+        containerPort: 8080,
+        data: true,
+      };
+      const committed = await commitFiles(
+        deps.sd,
+        { owner: "sys", name: "gitops" },
+        { [appSpecPath(owner, name)]: JSON.stringify(spec, null, 2) },
+        `apps: onramp ${owner}/${name}`,
+      );
+      if (committed.status === "error")
+        return json({ error: committed.error.message }, 500);
+      void deps.reconciler.kickAll();
+
+      // File the build from their words RIGHT NOW and return — the request must
+      // not block on a model call (the composer is a thinking call up to 30s;
+      // blocking on it made submit feel hung). The builder reads the raw
+      // description directly and builds it. A clean title is the first line.
+      const firstLine = description.split(/[.\n]/)[0]!.trim();
+      const title =
+        firstLine.length > 4 ? firstLine.slice(0, 72) : "Build my tool";
+      const issue = deps.forge.createIssue(user, owner, name, {
+        title,
+        body: description,
+        labels: ["agent-work"],
+      });
+      if (issue.status === "error")
+        return json({ error: issue.error.message }, 400);
+      deps.kickCrew();
+
+      return json(
+        {
+          owner,
+          app: name,
+          issue: issue.value.number,
+          host: hostFor(spec, deps.domain),
+        },
+        201,
+      );
+    }
+
+    // POST /api/v1/apps/import {url, owner?, name?} — clone an external repo,
+    // register it as an app, and file an agent-import issue so the crew tunes
+    // it to platform conventions (Dockerfile serving PORT, DATA_DIR sqlite).
+    if (req.method === "POST" && path === "/api/v1/apps/import") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const body = (await req.json().catch(() => null)) as {
+        url?: string;
+        owner?: string;
+        name?: string;
+      } | null;
+      const gitUrl = body?.url?.trim();
+      if (!gitUrl) return json({ error: "url required" }, 400);
+      const owner = body?.owner ?? user.username;
+      if (!deps.forge.canWriteOwner(user, owner))
+        return json({ error: `not a member of '${owner}'` }, 403);
+      const name = (body?.name ?? repoNameFromUrl(gitUrl)).toLowerCase();
+      if (!isValidName(name))
+        return json(
+          { error: `could not derive a valid app name from the URL` },
+          400,
+        );
+      if (isReservedAppName(name))
+        return json({ error: `'${name}' is reserved` }, 400);
+
+      const imported = await deps.forge.importFromRemote(
+        user,
+        owner,
+        name,
+        gitUrl,
+      );
+      if (imported.status === "error")
+        return json(
+          { error: imported.error.message },
+          imported.error.code === "conflict"
+            ? 409
+            : imported.error.code === "unauthorized"
+              ? 403
+              : 400,
+        );
+
+      const spec: AppSpec = {
+        owner,
+        app: name,
+        repo: { owner, name },
+        ref: "main",
+        containerPort: 8080,
+        data: true,
+      };
+      const committed = await commitFiles(
+        deps.sd,
+        { owner: "sys", name: "gitops" },
+        { [appSpecPath(owner, name)]: JSON.stringify(spec, null, 2) },
+        `apps: import ${owner}/${name} from ${gitUrl}`,
+      );
+      if (committed.status === "error")
+        return json({ error: committed.error.message }, 500);
+
+      // File the conversion work as an agent-import issue. The dispatcher maps
+      // that label to the importer crew role; the normal preview→review→merge
+      // pipeline ships the tuned app.
+      const issue = deps.forge.createIssue(user, owner, name, {
+        title: `Tune imported app to platform conventions`,
+        body: [
+          `This repo was imported from ${gitUrl}.`,
+          ``,
+          `Make it run as a platform app:`,
+          `- A Dockerfile that builds and starts the server, listening on the port in the PORT env var (default 8080).`,
+          `- Persist any data under the directory in the DATA_DIR env var (SQLite file and/or files/ subdir). Do not write elsewhere.`,
+          `- The container must run as a non-root user and start with no manual steps.`,
+          `- If the app has its own port in the code, either read PORT or update app.json's containerPort to match — keep them consistent.`,
+          `- Keep the app's existing functionality intact; only adapt packaging/config.`,
+          ``,
+          `Acceptance: the preview builds, serves HTTP 200 on / (or a documented health path), and survives a restart with its data intact.`,
+        ].join("\n"),
+        labels: ["agent-import", "agent-work"],
+      });
+      if (issue.status === "error")
+        return json({ error: issue.error.message }, 400);
+
+      void deps.reconciler.kickAll();
+      deps.kickCrew();
+      return json(
+        {
+          owner,
+          app: name,
+          issue: issue.value.number,
+          host: hostFor(spec, deps.domain),
+          cloneUrl: `https://${url.host}/${owner}/${name}.git`,
+        },
+        201,
+      );
+    }
+
+    // ── orgs ─────────────────────────────────────────────────────────────
+    // POST /api/v1/orgs {name, displayName?}
+    if (req.method === "POST" && path === "/api/v1/orgs") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const body = (await req.json().catch(() => null)) as {
+        name?: string;
+        displayName?: string;
+      } | null;
+      if (!body?.name) return json({ error: "org name required" }, 400);
+      const org = await deps.forge.createOrg(
+        user,
+        body.name,
+        body.displayName ?? "",
+      );
+      if (org.status === "error")
+        return json(
+          { error: org.error.message },
+          org.error.code === "conflict" ? 409 : 400,
+        );
+      return json(
+        { name: org.value.name, displayName: org.value.display_name },
+        201,
+      );
+    }
+
+    // POST /api/v1/orgs/:org/members {username}
+    const om = path.match(/^\/api\/v1\/orgs\/([^/]+)\/members$/);
+    if (req.method === "POST" && om) {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const body = (await req.json().catch(() => null)) as {
+        username?: string;
+      } | null;
+      if (!body?.username) return json({ error: "username required" }, 400);
+      const added = deps.forge.addOrgMember(user, om[1]!, body.username);
+      if (added.status === "error")
+        return json(
+          { error: added.error.message },
+          added.error.code === "unauthorized"
+            ? 403
+            : added.error.code === "not_found"
+              ? 404
+              : 400,
+        );
+      return json({ ok: true }, 201);
     }
 
     // ── pull requests ────────────────────────────────────────────────────
@@ -290,7 +610,11 @@ export function apiRouter(
         if (!user || !deps.forge.authorize(user, owner, repo, "read"))
           return json({ error: "unauthorized" }, user ? 403 : 401);
         const state = url.searchParams.get("state") ?? undefined;
-        return json({ issues: deps.store.listIssues(owner, repo, state) });
+        const issues = deps.store.listIssues(owner, repo, state).map((i) => ({
+          ...i,
+          openBlockers: deps.store.openBlockers(owner, repo, i.number),
+        }));
+        return json({ issues });
       }
       if (req.method === "POST") {
         const user = await deps.forge.authenticate(req);
@@ -335,12 +659,14 @@ export function apiRouter(
       return json({
         ...issue,
         comments: deps.store.listComments(owner, repo, Number(num)),
+        blockedBy: deps.store.listIssueBlockers(owner, repo, Number(num)),
+        openBlockers: deps.store.openBlockers(owner, repo, Number(num)),
       });
     }
 
-    // POST /api/v1/repos/:o/:n/issues/:num/{comments,labels,close}
+    // POST /api/v1/repos/:o/:n/issues/:num/{comments,labels,close,deps}
     im = path.match(
-      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/(comments|labels|close)$/,
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/(comments|labels|close|deps)$/,
     );
     if (req.method === "POST" && im) {
       const [, owner, repo, num, action] = im as unknown as [
@@ -381,6 +707,33 @@ export function apiRouter(
           );
         deps.kickCrew(); // labeling agent-work wakes the crew
         return json(r.value);
+      }
+      if (action === "deps") {
+        const body = (await req.json().catch(() => null)) as {
+          blockedBy?: number;
+          remove?: boolean;
+        } | null;
+        const blockedBy = Number(body?.blockedBy);
+        if (!Number.isInteger(blockedBy))
+          return json({ error: "blockedBy (issue number) required" }, 400);
+        const r = body?.remove
+          ? deps.forge.removeIssueDep(user, owner, repo, n, blockedBy)
+          : deps.forge.setIssueDep(user, owner, repo, n, blockedBy);
+        if (r.status === "error")
+          return json(
+            { error: r.error.message },
+            r.error.code === "unauthorized"
+              ? 403
+              : r.error.code === "not_found"
+                ? 404
+                : 400,
+          );
+        // A now-unblocked issue may be ready — nudge the crew.
+        deps.kickCrew();
+        return json({
+          ok: true,
+          blockedBy: deps.store.listIssueBlockers(owner, repo, n),
+        });
       }
       const closed = deps.forge.closeIssue(user, owner, repo, n);
       if (closed.status === "error")
