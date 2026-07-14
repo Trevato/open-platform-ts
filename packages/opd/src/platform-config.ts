@@ -1,6 +1,7 @@
 import { Result, TaggedError, type Log } from "@op/core";
 import { type AgentDef, CrewError } from "@op/crew";
 import type { GitHost } from "@op/git";
+import { DEFAULT_APP_POLICY, type AppPolicy } from "./manifest.ts";
 
 // The platform's OWN config lives in git — repo `plat/platform` — so the running
 // platform can be modified by committing to it (the Flux concept), and every
@@ -35,10 +36,13 @@ export class PlatformConfigError extends TaggedError("PlatformConfigError")<{
 
 export interface PlatformSettings {
   crew: { maxRework: number; sweepMs: number; model: string };
+  /** Operator bounds on what any app's op.json may request. */
+  apps: AppPolicy;
 }
 
 const DEFAULTS: PlatformSettings = {
   crew: { maxRework: 2, sweepMs: 30_000, model: "claude-sonnet-5" },
+  apps: DEFAULT_APP_POLICY,
 };
 
 // Model IDs/aliases only ("claude-sonnet-5", "opus", "us.anthropic.claude-…") —
@@ -66,7 +70,66 @@ export function admitPlatformConfig(
       return err("crew.sweepMs must be a number in 5000..600000");
     if (typeof model !== "string" || !MODEL_RE.test(model))
       return err("crew.model must be a model id like claude-sonnet-5");
-    return Result.ok({ crew: { maxRework, sweepMs, model } });
+
+    const a = (o as { apps?: Record<string, unknown> }).apps ?? {};
+    const d = DEFAULTS.apps;
+    const maxMemoryMb = Number(a["maxMemoryMb"] ?? d.maxMemoryMb);
+    const maxCpus = Number(a["maxCpus"] ?? d.maxCpus);
+    const maxTcpPortsPerApp = Number(
+      a["maxTcpPortsPerApp"] ?? d.maxTcpPortsPerApp,
+    );
+    const maxAssetMb = Number(a["maxAssetMb"] ?? d.maxAssetMb);
+    const rawRange = a["tcpPortRange"] ?? d.tcpPortRange;
+    if (
+      !Number.isInteger(maxMemoryMb) ||
+      maxMemoryMb < 64 ||
+      maxMemoryMb > 65536
+    )
+      return err("apps.maxMemoryMb must be an integer in 64..65536");
+    if (!Number.isFinite(maxCpus) || maxCpus < 0.1 || maxCpus > 64)
+      return err("apps.maxCpus must be a number in 0.1..64");
+    if (
+      !Number.isInteger(maxTcpPortsPerApp) ||
+      maxTcpPortsPerApp < 0 ||
+      maxTcpPortsPerApp > 16
+    )
+      return err("apps.maxTcpPortsPerApp must be an integer in 0..16");
+    if (!Number.isInteger(maxAssetMb) || maxAssetMb < 1 || maxAssetMb > 10240)
+      return err("apps.maxAssetMb must be an integer in 1..10240");
+    if (
+      !Array.isArray(rawRange) ||
+      rawRange.length !== 2 ||
+      !rawRange.every(
+        (p) =>
+          Number.isInteger(p) &&
+          (p as number) >= 1024 &&
+          (p as number) <= 65535,
+      ) ||
+      (rawRange[0] as number) > (rawRange[1] as number)
+    )
+      return err("apps.tcpPortRange must be [from, to] within 1024..65535");
+
+    const rawHosts = a["assetHosts"] ?? d.assetHosts;
+    if (
+      !Array.isArray(rawHosts) ||
+      rawHosts.length > 32 ||
+      !rawHosts.every(
+        (h) => typeof h === "string" && /^[a-z0-9.-]{1,253}$/.test(h),
+      )
+    )
+      return err("apps.assetHosts must be ≤ 32 lowercase hostnames");
+
+    return Result.ok({
+      crew: { maxRework, sweepMs, model },
+      apps: {
+        maxMemoryMb,
+        maxCpus,
+        tcpPortRange: [rawRange[0] as number, rawRange[1] as number],
+        maxTcpPortsPerApp,
+        maxAssetMb,
+        assetHosts: rawHosts as string[],
+      },
+    });
   } catch (cause) {
     return err(String(cause));
   }

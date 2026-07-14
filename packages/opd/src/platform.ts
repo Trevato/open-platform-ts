@@ -15,7 +15,7 @@ import {
 import { importDataDir, provisionDataDir, snapshot } from "@op/data";
 import { Engine } from "@op/engine";
 import { Forge, forgeRouter } from "@op/forge";
-import { ensureCa, Gate } from "@op/gate";
+import { ensureCa, Gate, TcpGate } from "@op/gate";
 import { GitHost } from "@op/git";
 import {
   extractAppSeed,
@@ -35,6 +35,7 @@ import {
   type SovereignKey,
 } from "@op/secrets";
 import { Store } from "@op/store";
+import { verifyAccessToken } from "@op/identity";
 import { apiRouter } from "./api.ts";
 import { consoleRouter } from "./console/index.ts";
 import { oidcRouter } from "./oidc.ts";
@@ -103,6 +104,7 @@ export class Platform {
     readonly forge: Forge,
     readonly engine: Engine,
     readonly gate: Gate,
+    readonly tcpGate: TcpGate,
     readonly reconciler: Reconciler,
     readonly log: Log,
     readonly ports: { http: number; https: number },
@@ -265,6 +267,17 @@ export class Platform {
 
         const oidcKey = await ensureSigningKey(sd);
 
+        // The platform's OWN config, in git (plat/platform). Hot-reloaded on
+        // push — a commit to that repo re-reads settings + crew prompts live,
+        // no restart. This is the self-modification surface (the Flux concept).
+        // Loaded before the reconciler so op.json admission sees real policy.
+        const platformConfig = new PlatformConfig(git, log);
+        await platformConfig.reload();
+
+        // L4 ingress: raw-TCP relays for ports apps declare in op.json.
+        // Same invariant as the HTTP gate — containers stay loopback-only.
+        const tcpGate = new TcpGate({ log });
+
         const reconciler = new Reconciler({
           sd,
           store,
@@ -274,6 +287,8 @@ export class Platform {
           httpsPort: opts.httpsPort,
           platformId,
           log,
+          appPolicy: () => platformConfig.get().apps,
+          onPortsChanged: () => tcpGate.sync(store.listAppPorts()),
         });
 
         // The dispatcher is created after the router (it needs the reconciler),
@@ -305,6 +320,7 @@ export class Platform {
               }
             : null,
           domain: opts.domain,
+          appPolicy: () => platformConfig.get().apps,
           log,
         });
         const oidcRoutes = oidcRouter({ forge, store, key: oidcKey, log });
@@ -327,6 +343,12 @@ export class Platform {
           );
         };
 
+        const originOf = (host: string): string =>
+          opts.httpsPort === 443
+            ? `https://${host}`
+            : `https://${host}:${opts.httpsPort}`;
+        const issuer = originOf(opts.domain);
+
         const gate = new Gate({
           store,
           domain: opts.domain,
@@ -335,6 +357,30 @@ export class Platform {
           tls: { cert: ca.cert, key: ca.key },
           platformHandler,
           resolveUser: async (req) => {
+            // App-to-app bearer tokens die here at the gate; identity
+            // continues upstream as the existing x-plat-user header with an
+            // app: prefix. The audience is checked against the TARGET host,
+            // so a token for one app verifies as nothing at any other.
+            const auth = req.headers.get("authorization") ?? "";
+            if (auth.toLowerCase().startsWith("bearer ")) {
+              const rawHost = req.headers.get("host") ?? "";
+              const host = rawHost.includes(":")
+                ? (rawHost.split(":")[0] as string)
+                : rawHost;
+              const verified = await verifyAccessToken(
+                auth.slice(7).trim(),
+                oidcKey,
+                issuer,
+                originOf(host.toLowerCase()),
+              );
+              if (
+                verified.status === "ok" &&
+                verified.value.sub.startsWith("app:")
+              )
+                return { username: verified.value.username };
+              // Not one of ours — fall through; apps may run their own
+              // bearer schemes behind the gate.
+            }
             const user = await forge.authenticate(req);
             return user ? { username: user.username } : null;
           },
@@ -346,16 +392,17 @@ export class Platform {
         });
 
         gate.start();
+        // Restore TCP relays for apps that were already running before this
+        // boot; the first reconcile pass refreshes any stale loopback targets.
+        tcpGate.sync(store.listAppPorts());
         reconciler.start();
 
-        // The platform's OWN config, in git (plat/platform). Hot-reloaded on
-        // push — a commit to that repo re-reads settings + crew prompts live,
-        // no restart. This is the self-modification surface (the Flux concept).
-        const platformConfig = new PlatformConfig(git, log);
-        await platformConfig.reload();
         git.onPush((evt) => {
-          if (evt.owner === PLAT.owner && evt.name === PLAT.name)
-            void platformConfig.reload();
+          if (evt.owner === PLAT.owner && evt.name === PLAT.name) {
+            // Reload, then re-converge: a policy change (say, a raised
+            // memory cap) should take effect without waiting for a push.
+            void platformConfig.reload().then(() => void reconciler.kickAll());
+          }
           // A merge to the platform's own SOURCE re-execs the daemon from it.
           if (evt.owner === OPD.owner && evt.name === OPD.name) {
             log.info("self-upgrade: plat/opd changed — requesting re-exec");
@@ -418,6 +465,7 @@ export class Platform {
           forge,
           engine,
           gate,
+          tcpGate,
           reconciler,
           log,
           { http: opts.httpPort, https: opts.httpsPort },
@@ -783,6 +831,7 @@ export class Platform {
   async stop(): Promise<void> {
     this.dispatcher?.stop();
     this.gate.stop();
+    this.tcpGate.stop();
     await this.reconciler.stop(); // drain in-flight passes before the store closes
     this.store.close();
   }

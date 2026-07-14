@@ -156,4 +156,20 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX issue_deps_repo ON issue_deps (owner, repo, number);
   `,
+  `
+  -- Public raw-TCP endpoints (the hosts-table analog for L4). An app's op.json
+  -- may declare container TCP ports (a Minecraft server's 25565); each gets a
+  -- STABLE public port from the platform's range — the allocation outlives
+  -- redeploys so players' saved addresses keep working. host_port is the
+  -- container's loopback binding the TCP gate relays to; NULL while stopped.
+  CREATE TABLE app_ports (
+    public_port    INTEGER PRIMARY KEY,
+    owner          TEXT NOT NULL,
+    app            TEXT NOT NULL,
+    container_port INTEGER NOT NULL,
+    host_port      INTEGER,
+    updated_at     INTEGER NOT NULL,
+    UNIQUE(owner, app, container_port)
+  );
+  `,
 ];

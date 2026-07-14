@@ -149,7 +149,11 @@ export function oidcRouter(deps: {
     // ── token ───────────────────────────────────────────────────────────
     if (path === "/oauth/token" && req.method === "POST") {
       const body = new URLSearchParams(await req.text());
-      if (body.get("grant_type") !== "authorization_code")
+      const grantType = body.get("grant_type");
+      if (
+        grantType !== "authorization_code" &&
+        grantType !== "client_credentials"
+      )
         return json({ error: "unsupported_grant_type" }, 400);
 
       const creds = clientCredsFrom(req, body);
@@ -157,6 +161,47 @@ export function oidcRouter(deps: {
       const client = deps.store.getClient(creds.id);
       if (!client || client.secret_hash !== (await sha256Hex(creds.secret)))
         return json({ error: "invalid_client" }, 401);
+
+      // App-to-app: the per-deploy OIDC client IS the service credential.
+      // The token's audience is the TARGET app's origin (RFC 8707 resource),
+      // so a token minted for shop verifies as nothing at hub — confused
+      // deputies are structural, not conventional. The `app:` sub prefix is
+      // unforgeable: isValidName forbids ':' in usernames.
+      if (grantType === "client_credentials") {
+        const resource = body.get("resource") ?? "";
+        let target: URL;
+        try {
+          target = new URL(resource);
+        } catch {
+          return json({ error: "invalid_target" }, 400);
+        }
+        const domain = url.hostname.toLowerCase();
+        const host = target.hostname.toLowerCase();
+        if (
+          target.protocol !== "https:" ||
+          (host !== domain && !host.endsWith(`.${domain}`))
+        )
+          return json({ error: "invalid_target" }, 400);
+        // A preview client's identity self-declares its PR: app-o-a-pr-N.
+        const preview = client.client_id
+          .replace(`app-${client.owner}-${client.app}`, "")
+          .replace(/^-/, "");
+        const subject = `app:${client.owner}/${client.app}${preview ? `@${preview}` : ""}`;
+        const accessToken = await signAccessToken(deps.key, {
+          issuer,
+          sub: subject,
+          username: subject,
+          scope: "app",
+          ttlSec: 600,
+          aud: target.origin,
+        });
+        return json({
+          access_token: accessToken,
+          token_type: "Bearer",
+          expires_in: 600,
+          scope: "app",
+        });
+      }
 
       const codeRow = deps.store.consumeCode(body.get("code") ?? "");
       if (!codeRow || codeRow.client_id !== creds.id)

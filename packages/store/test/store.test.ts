@@ -89,4 +89,33 @@ describe("Store", () => {
     expect(s.resolveHost("hello-ada.plat.localtest.me")).toBeNull();
     s.close();
   });
+
+  test("app_ports: sticky allocation, binding updates, release on removal", () => {
+    const s = freshStore();
+    const range: [number, number] = [25500, 25502];
+
+    // Allocation is stable per (owner, app, containerPort) across calls.
+    expect(s.allocateAppPort("ada", "mc", 25565, range)).toBe(25500);
+    expect(s.allocateAppPort("ada", "mc", 25565, range)).toBe(25500);
+    expect(s.allocateAppPort("ada", "mc", 25566, range)).toBe(25501);
+    expect(s.allocateAppPort("bob", "mc", 25565, range)).toBe(25502);
+    // Range exhausted → null, nothing inserted.
+    expect(s.allocateAppPort("eve", "mc", 25565, range)).toBeNull();
+
+    // Binding points the relay at the container's loopback port; null = stopped.
+    s.setAppPortBinding("ada", "mc", 25565, 41234);
+    const rows = s.listAppPortsFor("ada", "mc");
+    expect(rows.map((r) => [r.public_port, r.host_port])).toEqual([
+      [25500, 41234],
+      [25501, null],
+    ]);
+
+    // Removal releases the app's ports; other apps keep theirs.
+    s.deleteAppPortsFor("ada", "mc");
+    expect(s.listAppPortsFor("ada", "mc")).toEqual([]);
+    expect(s.listAppPorts().map((r) => r.public_port)).toEqual([25502]);
+    // The freed port is reusable.
+    expect(s.allocateAppPort("eve", "mc", 25565, range)).toBe(25500);
+    s.close();
+  });
 });

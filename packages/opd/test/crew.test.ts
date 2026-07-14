@@ -9,6 +9,7 @@ import { Forge } from "@op/forge";
 import { GitHost } from "@op/git";
 import { Store, type UserRow } from "@op/store";
 import { runBuilder } from "../src/crew/builder.ts";
+import { DEFAULT_APP_POLICY } from "../src/manifest.ts";
 import { Dispatcher, type DispatcherDeps } from "../src/crew/dispatcher.ts";
 import { parseVerdict } from "../src/crew/reviewer.ts";
 
@@ -22,6 +23,7 @@ const fakeLoadAgent = async (role: string) =>
   });
 const fakeConfig = () => ({
   crew: { maxRework: 2, sweepMs: 30_000, model: "claude-sonnet-5" },
+  apps: DEFAULT_APP_POLICY,
 });
 
 // The fake runner plays both roles: as the reviewer (cwd has REVIEW.md) it

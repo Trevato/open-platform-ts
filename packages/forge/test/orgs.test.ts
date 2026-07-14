@@ -81,4 +81,27 @@ describe("orgs", () => {
     expect(forge.addOrgMember(ada, "acme", "nobody").status).toBe("error"); // no such user
     expect(forge.addOrgMember(ada, "ghost", "bob").status).toBe("error"); // no such org
   });
+
+  test("re-inviting a member never demotes an owner", async () => {
+    const { forge } = fresh();
+    const ada = Result.unwrap(await forge.createUser("ada", "pw"));
+    const bob = Result.unwrap(await forge.createUser("bob", "pw"));
+    Result.unwrap(await forge.createOrg(ada, "acme"));
+    Result.unwrap(forge.addOrgMember(ada, "acme", "bob"));
+
+    // bob (member) re-invites ada (creator/owner) — role must survive.
+    Result.unwrap(forge.addOrgMember(bob, "acme", "ada"));
+    const roles = new Map(
+      forge.store.listOrgMembers("acme").map((m) => [m.username, m.role]),
+    );
+    expect(roles.get("ada")).toBe("owner");
+    expect(roles.get("bob")).toBe("member");
+
+    // explicit promotion via the store still works.
+    forge.store.addOrgMember("acme", bob.id, "owner");
+    expect(
+      forge.store.listOrgMembers("acme").find((m) => m.username === "bob")
+        ?.role,
+    ).toBe("owner");
+  });
 });

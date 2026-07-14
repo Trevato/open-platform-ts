@@ -3,5 +3,18 @@
     "maxRework": 2,
     "sweepMs": 30000,
     "model": "claude-sonnet-5"
+  },
+  "apps": {
+    "maxMemoryMb": 2048,
+    "maxCpus": 2,
+    "tcpPortRange": [25500, 25599],
+    "maxTcpPortsPerApp": 4,
+    "maxAssetMb": 512,
+    "assetHosts": [
+      "piston-data.mojang.com",
+      "launcher.mojang.com",
+      "api.papermc.io",
+      "fill-data.papermc.io"
+    ]
   }
 }

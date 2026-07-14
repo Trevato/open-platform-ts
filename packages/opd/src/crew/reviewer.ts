@@ -167,7 +167,10 @@ export async function runReviewer(
         deps.onProgress?.("🔍 reviewer starting");
         const run = await deps.runAgent({
           cwd: work,
-          systemPrompt: agent.value.instructions,
+          // Skills ride along from plat/platform — same seam as the builder.
+          systemPrompt: [agent.value.instructions, ...agent.value.skills].join(
+            "\n\n---\n\n",
+          ),
           prompt:
             "Review the live preview per REVIEW.md and ISSUE.md. Try to break it (auth, injection, bad input, regressions). End with exactly one verdict line.",
           oauthToken: deps.oauthToken,

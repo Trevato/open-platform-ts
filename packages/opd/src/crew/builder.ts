@@ -199,7 +199,11 @@ export async function runBuilder(
         );
         const run = await deps.runAgent({
           cwd: checkout,
-          systemPrompt: agent.value.instructions,
+          // Skills ride along from plat/platform (crew/<role>/skills/*.md) —
+          // the hot-reloadable seam for teaching conventions without a deploy.
+          systemPrompt: [agent.value.instructions, ...agent.value.skills].join(
+            "\n\n---\n\n",
+          ),
           prompt: rework
             ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers, keeping everything else working. Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.`
             : "Read ISSUE.md and implement exactly what it asks in this repository, then commit your work locally with a clear message. Do not push; do not open a pull request.",

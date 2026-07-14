@@ -89,7 +89,7 @@ export function discoveryDocument(issuer: string): Record<string, unknown> {
     userinfo_endpoint: `${issuer}/oauth/userinfo`,
     jwks_uri: `${issuer}/oauth/jwks`,
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "client_credentials"],
     subject_types_supported: ["public"],
     id_token_signing_alg_values_supported: [ALG],
     scopes_supported: ["openid", "profile"],
@@ -138,6 +138,10 @@ export async function signAccessToken(
     username: string;
     scope: string;
     ttlSec: number;
+    /** Defaults to the userinfo endpoint (user tokens). App-to-app tokens
+     *  carry the TARGET app's origin instead — disjoint audiences are the
+     *  invariant that keeps the two families from ever cross-authenticating. */
+    aud?: string;
   },
 ): Promise<string> {
   return new SignJWT({
@@ -147,7 +151,7 @@ export async function signAccessToken(
     .setProtectedHeader({ alg: ALG, kid: key.kid })
     .setIssuer(claims.issuer)
     .setSubject(claims.sub)
-    .setAudience(`${claims.issuer}/userinfo`)
+    .setAudience(claims.aud ?? `${claims.issuer}/userinfo`)
     .setIssuedAt()
     .setExpirationTime(now() + claims.ttlSec)
     .sign(key.privateKey);
@@ -183,13 +187,14 @@ export async function verifyAccessToken(
   token: string,
   key: SigningKey,
   issuer: string,
+  audience?: string,
 ): Promise<
   Result<{ sub: string; username: string; scope: string }, OidcError>
 > {
   try {
     const { payload } = await jwtVerify(token, key.publicKey, {
       issuer,
-      audience: `${issuer}/userinfo`,
+      audience: audience ?? `${issuer}/userinfo`,
     });
     return Result.ok({
       sub: String(payload.sub),

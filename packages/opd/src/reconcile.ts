@@ -12,7 +12,18 @@ import { branchData, deleteBranchData, provisionDataDir } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { GitHost } from "@op/git";
 import type { Store } from "@op/store";
+import {
+  ensureAssetsCached,
+  placeAssets,
+  type ResolvedAsset,
+} from "./assets.ts";
 import { readAppSpecs, SYS } from "./gitops.ts";
+import {
+  DEFAULT_APP_POLICY,
+  envNameFor,
+  readManifest,
+  type AppPolicy,
+} from "./manifest.ts";
 import { provisionAppClient } from "./oidc-clients.ts";
 import { admitImageTag, hostFor, type AppSpec } from "./policy.ts";
 
@@ -37,8 +48,16 @@ export class Reconciler {
       httpsPort: number;
       platformId: string;
       log: Log;
+      /** Operator bounds for op.json admission (hot-reloadable platform.json). */
+      appPolicy?: () => AppPolicy;
+      /** Fired whenever app_ports rows changed — the TCP gate re-syncs. */
+      onPortsChanged?: () => void;
     },
   ) {}
+
+  private policy(): AppPolicy {
+    return this.deps.appPolicy?.() ?? DEFAULT_APP_POLICY;
+  }
 
   /** External origin for a host on this platform (honors a non-443 port). */
   private originFor(host: string): string {
@@ -205,14 +224,20 @@ export class Reconciler {
       (c) => c.image === v.tag && c.state === "running",
     );
     if (converged) {
-      if (converged.hostPort !== null)
+      // Multi-port containers: the HTTP route is the binding for the spec's
+      // containerPort; any others are TCP-gate targets to refresh.
+      const http = converged.ports.find(
+        (p) => p.containerPort === spec.containerPort,
+      );
+      if (http)
         store.setHost(
           v.host,
           spec.owner,
           spec.app,
           converged.id,
-          converged.hostPort,
+          http.hostPort,
         );
+      if (isProd) this.refreshTcpBindings(spec, converged.ports);
       return;
     }
 
@@ -273,6 +298,68 @@ export class Reconciler {
         return;
       }
 
+      // The app's own requirements (op.json beside its Dockerfile) — admitted
+      // against platform policy, fail-closed like every other admission.
+      const manifest = await readManifest(join(work, "src"), this.policy());
+      if (manifest.status === "error")
+        return fail(`op.json: ${manifest.error.reason}`);
+      const need = manifest.value;
+      if (need.assets.length > 0 && !spec.data)
+        return fail("op.json declares assets but app.json has data:false");
+
+      // Peer wiring is derived, never stored: a peer's URL follows from its
+      // name alone, so injection can't block on (or go stale with) presence.
+      // An absent peer is a 404 at the gate — a runtime condition the app
+      // handles like any network call. Previews get the same prod peers.
+      const peers = need.consumes.map((c) => {
+        const owner = c.owner ?? spec.owner;
+        const host = `${c.app}-${owner}.${this.deps.domain}`;
+        return { owner, app: c.app, host, url: this.originFor(host) };
+      });
+      if (peers.some((p) => p.owner === spec.owner && p.app === spec.app))
+        return fail("op.json: an app cannot consume itself");
+
+      // Assets fill a content-addressed cache BEFORE the build, so a slow
+      // download never overlaps the window where the old container is gone.
+      let resolvedAssets: ResolvedAsset[] = [];
+      if (need.assets.length > 0) {
+        const cachedAll = await ensureAssetsCached(
+          join(this.deps.sd.root, "assets"),
+          need.assets,
+          {
+            maxBytes: this.policy().maxAssetMb * 1024 * 1024,
+            allowedHosts: this.policy().assetHosts,
+            onEvent: (message) => emit("assets", message),
+          },
+        );
+        if (cachedAll.status === "error")
+          return fail(
+            `asset ${cachedAll.error.asset}: ${cachedAll.error.message}`,
+          );
+        resolvedAssets = cachedAll.value;
+      }
+
+      // Public TCP ports are claimed before the container runs so the app can
+      // render its own join address (OP_TCP_PORT_<n>). Sticky per (app, port):
+      // players keep the address across every redeploy. Prod only — previews
+      // are reviewed over HTTP and never bind public ports.
+      const publicPorts = new Map<number, number>();
+      if (isProd) {
+        for (const port of need.tcpPorts) {
+          const pub = store.allocateAppPort(
+            spec.owner,
+            spec.app,
+            port,
+            this.policy().tcpPortRange,
+          );
+          if (pub === null)
+            return fail(
+              `no free public TCP port in range ${this.policy().tcpPortRange.join("-")}`,
+            );
+          publicPorts.set(port, pub);
+        }
+      }
+
       emit("building", `image ${v.tag.split(":")[0]}`);
       const logFile = buildLogPath(
         this.deps.sd,
@@ -309,6 +396,16 @@ export class Reconciler {
         dataDir = provisioned.value;
       }
 
+      // Cached assets land in /data before the container ever starts, so the
+      // app wakes up with its server.jar (or model, or dataset) in place.
+      if (resolvedAssets.length > 0 && dataDir) {
+        const placed = await placeAssets(dataDir, resolvedAssets);
+        if (placed.status === "error")
+          return fail(`asset ${placed.error.asset}: ${placed.error.message}`);
+        if (placed.value.length > 0)
+          emit("assets", `placed ${placed.value.join(", ")}`);
+      }
+
       const issuer = this.originFor(this.deps.domain);
       const oidc = await provisionAppClient(
         store,
@@ -324,6 +421,15 @@ export class Reconciler {
         app: spec.app,
         platformId: this.deps.platformId,
         containerPort: spec.containerPort,
+        // Raw TCP is a prod-only capability: previews are reviewed over HTTP
+        // and must not claim public ports.
+        ...(isProd && need.tcpPorts.length ? { tcpPorts: need.tcpPorts } : {}),
+        ...(need.resources.memoryMb
+          ? { memoryBytes: need.resources.memoryMb * 1024 * 1024 }
+          : {}),
+        ...(need.resources.cpus
+          ? { nanoCpus: Math.round(need.resources.cpus * 1e9) }
+          : {}),
         env: {
           PORT: String(spec.containerPort),
           DATA_DIR: "/data",
@@ -338,9 +444,23 @@ export class Reconciler {
           OP_CA_FILE: "/etc/op/ca.crt",
           NODE_EXTRA_CA_CERTS: "/etc/op/ca.crt",
           APP_SECRET: randomAppSecret(),
+          // Peer URLs by derivation: OP_PEER_<APP>_URL for each consume.
+          ...Object.fromEntries(peers.map((p) => [envNameFor(p.app), p.url])),
+          // The app's public join addresses: OP_TCP_PORT_<containerPort>.
+          ...Object.fromEntries(
+            [...publicPorts].map(([cp, pub]) => [
+              `OP_TCP_PORT_${cp}`,
+              String(pub),
+            ]),
+          ),
         },
         caFile: join(this.deps.sd.certsDir, "ca.crt"),
-        extraHosts: [`${this.deps.domain}:host-gateway`],
+        // host-gateway for the platform itself AND each consumed peer's host,
+        // so peer subdomains resolve from inside the container in local/dev.
+        extraHosts: [
+          `${this.deps.domain}:host-gateway`,
+          ...peers.map((p) => `${p.host}:host-gateway`),
+        ],
         ...(v.preview ? { preview: v.preview } : {}),
         ...(dataDir ? { dataDir } : {}),
       });
@@ -354,6 +474,16 @@ export class Reconciler {
         ran.value.containerId,
         ran.value.hostPort,
       );
+
+      if (publicPorts.size > 0) {
+        for (const [port, pub] of publicPorts) {
+          const loopback = ran.value.tcpHostPorts[port];
+          store.setAppPortBinding(spec.owner, spec.app, port, loopback ?? null);
+          emit("tcp", `${this.deps.domain}:${pub} → container :${port}`);
+        }
+        this.deps.onPortsChanged?.();
+      }
+
       if (isProd) {
         store.upsertAppStatus({
           owner: spec.owner,
@@ -374,6 +504,32 @@ export class Reconciler {
     } finally {
       await rm(work, { recursive: true, force: true });
     }
+  }
+
+  /** Point existing public-port allocations at a running container's loopback
+   *  bindings — the level-based path for a daemon restart over live apps. */
+  private refreshTcpBindings(
+    spec: AppSpec,
+    ports: Array<{ containerPort: number; hostPort: number }>,
+  ): void {
+    const rows = this.deps.store.listAppPortsFor(spec.owner, spec.app);
+    if (rows.length === 0) return;
+    let changed = false;
+    for (const row of rows) {
+      const live =
+        ports.find((p) => p.containerPort === row.container_port)?.hostPort ??
+        null;
+      if (live !== row.host_port) {
+        this.deps.store.setAppPortBinding(
+          spec.owner,
+          spec.app,
+          row.container_port,
+          live,
+        );
+        changed = true;
+      }
+    }
+    if (changed) this.deps.onPortsChanged?.();
   }
 
   /** Reconcile a preview per open PR whose repo is a deployed app. */
@@ -424,6 +580,8 @@ export class Reconciler {
       log.info("pruning", { owner: c.owner, app: c.app });
       await engine.stopAndRemove(c.id);
       store.deleteHostsFor(c.owner, c.app);
+      store.deleteAppPortsFor(c.owner, c.app);
+      this.deps.onPortsChanged?.();
       store.appendEvent(c.owner, c.app, "stopped", "app removed", null);
     }
   }

@@ -68,6 +68,9 @@ export interface RunAppSpec {
   platformId: string;
   env: Record<string, string>;
   containerPort: number;
+  /** Extra container TCP ports published to loopback (the TCP gate relays
+   *  them to their public ports; nothing binds beyond 127.0.0.1 here). */
+  tcpPorts?: number[];
   dataDir?: string; // bind-mounted at /data
   caFile?: string; // host CA path, bind-mounted read-only at /etc/op/ca.crt
   extraHosts?: string[]; // Docker ExtraHosts, e.g. "plat.localtest.me:host-gateway"
@@ -217,20 +220,36 @@ export class Engine {
     return Result.ok({ imageId: image.Id });
   }
 
-  async runApp(
-    spec: RunAppSpec,
-  ): Promise<Result<{ containerId: string; hostPort: number }, EngineError>> {
+  async runApp(spec: RunAppSpec): Promise<
+    Result<
+      {
+        containerId: string;
+        hostPort: number;
+        /** container TCP port → loopback host port, for spec.tcpPorts */
+        tcpHostPorts: Record<number, number>;
+      },
+      EngineError
+    >
+  > {
     const op = "runApp";
     const portKey = `${spec.containerPort}/tcp`;
+    // 127.0.0.1:0 for EVERY port — engine assigns ephemeral host ports, never
+    // exposed beyond loopback; the gate (HTTP + TCP relay) is the only public
+    // ingress.
+    const loopback = [{ HostIp: "127.0.0.1", HostPort: "0" }];
+    const portKeys = [
+      portKey,
+      ...(spec.tcpPorts ?? [])
+        .filter((p) => p !== spec.containerPort)
+        .map((p) => `${p}/tcp`),
+    ];
     const hostConfig: Record<string, unknown> = {
       CapDrop: ["ALL"],
       SecurityOpt: ["no-new-privileges"],
       RestartPolicy: { Name: "always" },
       Memory: spec.memoryBytes ?? 512 * 1024 * 1024,
       NanoCpus: spec.nanoCpus ?? 1_000_000_000,
-      // 127.0.0.1:0 — engine assigns an ephemeral host port, never exposed
-      // beyond loopback; the gate is the only public ingress.
-      PortBindings: { [portKey]: [{ HostIp: "127.0.0.1", HostPort: "0" }] },
+      PortBindings: Object.fromEntries(portKeys.map((k) => [k, loopback])),
     };
     // dataDir is bind-mounted; the caller pre-creates it 0777 (see @op/data)
     // so the default 65534:65534 user can write without a chown dance.
@@ -250,7 +269,7 @@ export class Engine {
         Image: spec.image,
         User: spec.user ?? "65534:65534",
         Env: Object.entries(spec.env).map(([k, v]) => `${k}=${v}`),
-        ExposedPorts: { [portKey]: {} },
+        ExposedPorts: Object.fromEntries(portKeys.map((k) => [k, {}])),
         Labels: {
           "op.platform": spec.platformId,
           "op.owner": spec.owner,
@@ -288,17 +307,30 @@ export class Engine {
           Ports: Record<string, Array<{ HostPort: string }> | null>;
         };
       };
-      const binding = info.NetworkSettings.Ports[portKey]?.[0];
-      if (binding) {
+      const bound = new Map<string, number>();
+      for (const key of portKeys) {
+        const binding = info.NetworkSettings.Ports[key]?.[0];
+        if (!binding) continue;
         const hostPort = Number.parseInt(binding.HostPort, 10);
-        if (Number.isFinite(hostPort) && hostPort > 0)
-          return Result.ok({ containerId, hostPort });
+        if (Number.isFinite(hostPort) && hostPort > 0) bound.set(key, hostPort);
+      }
+      if (bound.size === portKeys.length) {
+        const tcpHostPorts: Record<number, number> = {};
+        for (const p of spec.tcpPorts ?? []) {
+          const hp = bound.get(`${p}/tcp`);
+          if (hp !== undefined) tcpHostPorts[p] = hp;
+        }
+        return Result.ok({
+          containerId,
+          hostPort: bound.get(portKey) as number,
+          tcpHostPorts,
+        });
       }
       await Bun.sleep(100);
     }
     return Result.err(
       new EngineError({
-        message: `no host port published for ${portKey} on ${containerId}`,
+        message: `host ports not published for ${portKeys.join(", ")} on ${containerId}`,
         op,
       }),
     );
@@ -338,6 +370,8 @@ export class Engine {
         image: string;
         state: string;
         hostPort: number | null;
+        /** every published binding: container port → loopback host port */
+        ports: Array<{ containerPort: number; hostPort: number }>;
       }>,
       EngineError
     >
@@ -353,7 +387,12 @@ export class Engine {
     const list = (await res.value.json()) as ContainerSummary[];
     return Result.ok(
       list.map((c) => {
-        const published = c.Ports.find((p) => p.PublicPort !== undefined);
+        const ports = c.Ports.filter((p) => p.PublicPort !== undefined).map(
+          (p) => ({
+            containerPort: p.PrivatePort,
+            hostPort: p.PublicPort as number,
+          }),
+        );
         return {
           id: c.Id,
           owner: c.Labels["op.owner"] ?? "",
@@ -361,7 +400,10 @@ export class Engine {
           preview: c.Labels["op.preview"] ?? null,
           image: c.Image,
           state: c.State,
-          hostPort: published?.PublicPort ?? null,
+          // Single-port apps keep the simple field; multi-port callers use
+          // `ports` and pick by container port.
+          hostPort: ports.length === 1 ? (ports[0]?.hostPort ?? null) : null,
+          ports,
         };
       }),
     );

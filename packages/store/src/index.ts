@@ -42,6 +42,15 @@ export interface HostRow {
   updated_at: number;
 }
 
+export interface AppPortRow {
+  public_port: number;
+  owner: string;
+  app: string;
+  container_port: number;
+  host_port: number | null;
+  updated_at: number;
+}
+
 export interface AppStatusRow {
   owner: string;
   app: string;
@@ -330,9 +339,12 @@ export class Store {
   }
 
   addOrgMember(org: string, userId: string, role = "member"): void {
+    // Re-adding an existing member may promote (member → owner) but never
+    // demote: a roleless re-invite must not strip the creator's ownership.
     this.db.run(
       `INSERT INTO org_members (org, user_id, role, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(org, user_id) DO UPDATE SET role = excluded.role`,
+       ON CONFLICT(org, user_id) DO UPDATE SET
+         role = CASE WHEN org_members.role = 'owner' THEN 'owner' ELSE excluded.role END`,
       [org, userId, role, Date.now()],
     );
   }
@@ -408,6 +420,79 @@ export class Store {
 
   deleteHost(host: string): void {
     this.db.run("DELETE FROM hosts WHERE host = ?", [host]);
+  }
+
+  // ── public TCP ports (the hosts analog for L4, relayed by the TCP gate) ──
+  /** Stable public port for (owner, app, containerPort): reuse the existing
+   *  allocation, else claim the lowest free port in the platform range.
+   *  Returns null when the range is exhausted. */
+  allocateAppPort(
+    owner: string,
+    app: string,
+    containerPort: number,
+    range: [number, number],
+  ): number | null {
+    const existing = this.db
+      .query<
+        AppPortRow,
+        [string, string, number]
+      >("SELECT * FROM app_ports WHERE owner = ? AND app = ? AND container_port = ?")
+      .get(owner, app, containerPort);
+    if (existing) return existing.public_port;
+    const taken = new Set(
+      this.db
+        .query<{ public_port: number }, []>("SELECT public_port FROM app_ports")
+        .all()
+        .map((r) => r.public_port),
+    );
+    for (let p = range[0]; p <= range[1]; p++) {
+      if (taken.has(p)) continue;
+      this.db.run(
+        `INSERT INTO app_ports (public_port, owner, app, container_port, host_port, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+        [p, owner, app, containerPort, Date.now()],
+      );
+      return p;
+    }
+    return null;
+  }
+
+  /** Point a public port at the container's loopback binding (null = stopped). */
+  setAppPortBinding(
+    owner: string,
+    app: string,
+    containerPort: number,
+    hostPort: number | null,
+  ): void {
+    this.db.run(
+      `UPDATE app_ports SET host_port = ?, updated_at = ?
+       WHERE owner = ? AND app = ? AND container_port = ?`,
+      [hostPort, Date.now(), owner, app, containerPort],
+    );
+  }
+
+  listAppPorts(): AppPortRow[] {
+    return this.db
+      .query<AppPortRow, []>("SELECT * FROM app_ports ORDER BY public_port")
+      .all();
+  }
+
+  listAppPortsFor(owner: string, app: string): AppPortRow[] {
+    return this.db
+      .query<
+        AppPortRow,
+        [string, string]
+      >("SELECT * FROM app_ports WHERE owner = ? AND app = ? ORDER BY container_port")
+      .all(owner, app);
+  }
+
+  /** Release an app's public ports — only on app removal, never on redeploy,
+   *  so the public address players saved stays stable across restarts. */
+  deleteAppPortsFor(owner: string, app: string): void {
+    this.db.run("DELETE FROM app_ports WHERE owner = ? AND app = ?", [
+      owner,
+      app,
+    ]);
   }
 
   // ── app status (runtime observation, written by the reconciler) ───────

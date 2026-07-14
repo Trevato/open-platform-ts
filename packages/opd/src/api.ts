@@ -6,6 +6,8 @@ import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
 import type { Store } from "@op/store";
 import { appSpecPath, commitFiles, readAppSpecs, TEMPLATE } from "./gitops.ts";
+import { computeIntegrationMap } from "./integration.ts";
+import type { AppPolicy } from "./manifest.ts";
 import { hostFor, type AppSpec } from "./policy.ts";
 import type { Reconciler } from "./reconcile.ts";
 
@@ -112,6 +114,9 @@ export interface ApiDeps {
       } | null>)
     | null;
   domain: string;
+  /** Operator bounds for op.json — used to admit manifests when deriving
+   *  the integration map. */
+  appPolicy: () => AppPolicy;
   log: Log;
 }
 
@@ -125,6 +130,22 @@ export function apiRouter(
     const path = url.pathname;
 
     if (path === "/healthz") return json({ ok: true, domain: deps.domain });
+
+    // GET /api/v1/integration-map[?owner=] — the derived app graph. Public
+    // read under M1 (it derives from public-read repos and statuses), which
+    // doubles as runtime discovery for apps themselves: a hub filters
+    // provides by name and sees new peers with no redeploy.
+    if (req.method === "GET" && path === "/api/v1/integration-map") {
+      const owner = url.searchParams.get("owner");
+      const map = await computeIntegrationMap({
+        git: deps.git,
+        store: deps.store,
+        domain: deps.domain,
+        policy: deps.appPolicy(),
+        ...(owner ? { owner } : {}),
+      });
+      return json(map);
+    }
 
     // POST /api/v1/apps {name} — template → repo → spec → reconcile.
     if (req.method === "POST" && path === "/api/v1/apps") {
