@@ -249,6 +249,30 @@ export class Reconciler {
       if ((await clone.exited) !== 0)
         return fail(`clone: ${await new Response(clone.stderr).text()}`);
 
+      // A repo with no Dockerfile on this ref has nothing to build yet — a
+      // fresh GitHub import the crew is still tuning, or a repo pushed before
+      // its Dockerfile. Building anyway just fails "Cannot locate Dockerfile"
+      // on every reconcile (noisy, and shows the app as broken). Treat it as a
+      // benign WAIT: the importer crew's PR adds the Dockerfile, and merging it
+      // re-kicks this build. Previews always build from a branch that already
+      // has one, so this only bites the pre-tuning prod build.
+      if (!(await Bun.file(join(work, "src", "Dockerfile")).exists())) {
+        emit("waiting", "no Dockerfile yet — the build crew is preparing it");
+        if (isProd) {
+          const prev = store.getAppStatus(spec.owner, spec.app);
+          store.upsertAppStatus({
+            owner: spec.owner,
+            app: spec.app,
+            state: "pending",
+            image_digest: prev?.image_digest ?? null,
+            container_id: prev?.container_id ?? null,
+            message:
+              "Waiting for a Dockerfile — the build crew is preparing this app.",
+          });
+        }
+        return;
+      }
+
       emit("building", `image ${v.tag.split(":")[0]}`);
       const logFile = buildLogPath(
         this.deps.sd,
