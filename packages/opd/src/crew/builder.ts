@@ -120,6 +120,8 @@ export interface BuilderDeps {
    *  source/config repos. Defaults to "builder". */
   role?: string;
   oauthToken: string;
+  /** Claude model for the agent run (platform config crew.model). */
+  model?: string;
   log: Log;
   onProgress?: (line: string) => void;
 }
@@ -202,6 +204,7 @@ export async function runBuilder(
             ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers, keeping everything else working. Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.`
             : "Read ISSUE.md and implement exactly what it asks in this repository, then commit your work locally with a clear message. Do not push; do not open a pull request.",
           oauthToken: deps.oauthToken,
+          ...(deps.model ? { model: deps.model } : {}),
           allowedTools: BUILDER_ALLOWED_TOOLS,
           disallowedTools: BUILDER_DENIED_TOOLS,
           idleTimeoutMs: 8 * 60_000,

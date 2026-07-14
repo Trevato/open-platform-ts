@@ -15,6 +15,8 @@ export interface AgentRun {
   prompt: string;
   /** Claude Code OAuth token (sk-ant-oat01…) — inference credential. */
   oauthToken: string;
+  /** Claude model for the run (e.g. "claude-sonnet-5"); CLI default when unset. */
+  model?: string;
   /** Tool allowlist, e.g. ["Read","Edit","Bash(git *)"]. */
   allowedTools: string[];
   /** Tool denylist, e.g. ["Bash(rm -rf *)","WebFetch"]. */
@@ -81,6 +83,7 @@ export const claudeRunner: RunAgent = async (run) => {
     run.prompt,
     "--append-system-prompt",
     run.systemPrompt,
+    ...(run.model ? ["--model", run.model] : []),
     "--output-format",
     "stream-json",
     "--verbose",

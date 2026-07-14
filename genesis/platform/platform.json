@@ -1,6 +1,7 @@
 {
   "crew": {
     "maxRework": 2,
-    "sweepMs": 30000
+    "sweepMs": 30000,
+    "model": "claude-sonnet-5"
   }
 }

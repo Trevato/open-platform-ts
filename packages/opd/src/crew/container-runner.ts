@@ -124,6 +124,7 @@ export function makeContainerRunner(
         run.prompt,
         "--append-system-prompt",
         run.systemPrompt,
+        ...(run.model ? ["--model", run.model] : []),
         "--dangerously-skip-permissions", // safe: the container is the cage
         "--output-format",
         "stream-json",

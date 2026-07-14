@@ -93,6 +93,15 @@ export class Dispatcher {
     for (const issue of issues) {
       const k = this.key(issue);
       if (this.inflight.has(k)) continue;
+      // DAG flow control: don't start an issue while any blocker is still open.
+      // When the blocker ships (issue closed), a later tick picks this up — no
+      // explicit unblock needed, since openBlockers filters on state.
+      const blockers = this.deps.store.openBlockers(
+        issue.owner,
+        issue.repo,
+        issue.number,
+      );
+      if (blockers.length > 0) continue;
       // Claim BEFORE any await so a concurrent tick can't double-pick.
       this.inflight.add(k);
       void this.process(issue).finally(() => this.inflight.delete(k));
@@ -379,8 +388,16 @@ export class Dispatcher {
       runAgent: this.deps.runAgent!,
       loadAgent: this.deps.loadAgent,
       // The platform's own repos get the platform-dev prompt, not the app builder.
-      role: isSelfRepo(issue.owner, issue.repo) ? "platform-dev" : "builder",
+      // Role by context: the platform's own repos → platform-dev; a fresh
+      // import (agent-import label, present only on the first conversion issue)
+      // → importer; everything else → the app builder.
+      role: isSelfRepo(issue.owner, issue.repo)
+        ? "platform-dev"
+        : issue.labels.split(",").includes("agent-import")
+          ? "importer"
+          : "builder",
       oauthToken: this.deps.oauthToken!,
+      model: this.deps.config().crew.model,
       log: this.deps.log,
       onProgress: (line: string) => this.comment(issue, line),
     };
@@ -394,6 +411,7 @@ export class Dispatcher {
       runAgent: this.deps.runAgent!,
       loadAgent: this.deps.loadAgent,
       oauthToken: this.deps.oauthToken!,
+      model: this.deps.config().crew.model,
       qaUser: this.deps.qaUser,
       qaPassword: this.deps.qaPassword,
       log: this.deps.log,

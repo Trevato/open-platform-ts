@@ -20,7 +20,9 @@ const fakeLoadAgent = async (role: string) =>
     instructions: `test ${role} prompt`,
     skills: [] as string[],
   });
-const fakeConfig = () => ({ crew: { maxRework: 2, sweepMs: 30_000 } });
+const fakeConfig = () => ({
+  crew: { maxRework: 2, sweepMs: 30_000, model: "claude-sonnet-5" },
+});
 
 // The fake runner plays both roles: as the reviewer (cwd has REVIEW.md) it
 // returns a verdict line; as the builder it writes a feature file.

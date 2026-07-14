@@ -93,6 +93,8 @@ export interface ReviewerDeps {
   runAgent: RunAgent;
   loadAgent: LoadAgent; // the reviewer role prompt, from git (plat/platform)
   oauthToken: string;
+  /** Claude model for the agent run (platform config crew.model). */
+  model?: string;
   qaUser: string;
   qaPassword: string;
   log: Log;
@@ -169,6 +171,7 @@ export async function runReviewer(
           prompt:
             "Review the live preview per REVIEW.md and ISSUE.md. Try to break it (auth, injection, bad input, regressions). End with exactly one verdict line.",
           oauthToken: deps.oauthToken,
+          ...(deps.model ? { model: deps.model } : {}),
           allowedTools: [], // caged: the container is the boundary
           idleTimeoutMs: 6 * 60_000,
           hardTimeoutMs: 15 * 60_000,

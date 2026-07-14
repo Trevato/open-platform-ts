@@ -44,6 +44,22 @@ describe("admitPlatformConfig", () => {
     );
     expect(admitPlatformConfig({ crew: { sweepMs: 10 } }).status).toBe("error");
   });
+  test("crew.model: defaults to sonnet-5, accepts ids, rejects flags", () => {
+    expect(Result.unwrap(admitPlatformConfig({})).crew.model).toBe(
+      "claude-sonnet-5",
+    );
+    expect(
+      Result.unwrap(admitPlatformConfig({ crew: { model: "claude-opus-4-8" } }))
+        .crew.model,
+    ).toBe("claude-opus-4-8");
+    // A config commit must never smuggle a CLI flag or junk into the spawn.
+    expect(
+      admitPlatformConfig({ crew: { model: "--dangerously-skip-permissions" } })
+        .status,
+    ).toBe("error");
+    expect(admitPlatformConfig({ crew: { model: "" } }).status).toBe("error");
+    expect(admitPlatformConfig({ crew: { model: 42 } }).status).toBe("error");
+  });
 });
 
 describe("PlatformConfig", () => {

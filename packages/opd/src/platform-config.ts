@@ -34,10 +34,16 @@ export class PlatformConfigError extends TaggedError("PlatformConfigError")<{
 }>() {}
 
 export interface PlatformSettings {
-  crew: { maxRework: number; sweepMs: number };
+  crew: { maxRework: number; sweepMs: number; model: string };
 }
 
-const DEFAULTS: PlatformSettings = { crew: { maxRework: 2, sweepMs: 30_000 } };
+const DEFAULTS: PlatformSettings = {
+  crew: { maxRework: 2, sweepMs: 30_000, model: "claude-sonnet-5" },
+};
+
+// Model IDs/aliases only ("claude-sonnet-5", "opus", "us.anthropic.claude-…") —
+// must not start with "-" so a config commit can never smuggle a CLI flag.
+const MODEL_RE = /^[a-z0-9][a-z0-9.:-]{0,63}$/;
 
 // Fail-closed validator (the admitSpec analog): reject out-of-range so a bad
 // commit can't brick the crew (e.g. maxRework:9999 or sweepMs:1).
@@ -48,16 +54,19 @@ export function admitPlatformConfig(
     Result.err(new PlatformConfigError({ message }));
   try {
     const o = (raw ?? {}) as {
-      crew?: { maxRework?: unknown; sweepMs?: unknown };
+      crew?: { maxRework?: unknown; sweepMs?: unknown; model?: unknown };
     };
     const crew = o.crew ?? {};
     const maxRework = Number(crew.maxRework ?? DEFAULTS.crew.maxRework);
     const sweepMs = Number(crew.sweepMs ?? DEFAULTS.crew.sweepMs);
+    const model = crew.model ?? DEFAULTS.crew.model;
     if (!Number.isInteger(maxRework) || maxRework < 0 || maxRework > 5)
       return err("crew.maxRework must be an integer in 0..5");
     if (!Number.isFinite(sweepMs) || sweepMs < 5_000 || sweepMs > 600_000)
       return err("crew.sweepMs must be a number in 5000..600000");
-    return Result.ok({ crew: { maxRework, sweepMs } });
+    if (typeof model !== "string" || !MODEL_RE.test(model))
+      return err("crew.model must be a model id like claude-sonnet-5");
+    return Result.ok({ crew: { maxRework, sweepMs, model } });
   } catch (cause) {
     return err(String(cause));
   }
