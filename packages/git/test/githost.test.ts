@@ -213,6 +213,71 @@ describe("bundle / restore", () => {
   });
 });
 
+describe("cloneFromRemote", () => {
+  // Build a real external repo (default branch "trunk") we can clone via file://
+  async function makeRemote(): Promise<string> {
+    const work = scratch();
+    await sh(work, ["git", "init", "-q", "-b", "trunk"]);
+    writeFileSync(join(work, "index.js"), "console.log('hi')\n");
+    await sh(work, ["git", "add", "-A"]);
+    await sh(work, [
+      "git",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-q",
+      "-m",
+      "init",
+    ]);
+    return work;
+  }
+
+  test("imports an external repo and normalizes the default branch to main", async () => {
+    const { host } = freshHost();
+    const remote = await makeRemote();
+    Result.unwrap(
+      await host.cloneFromRemote(`file://${remote}`, "ada", "imported", {
+        allowLocal: true,
+      }),
+    );
+    const head = Result.unwrap(await host.headSha("ada", "imported"));
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    const bytes = Result.unwrap(
+      await host.readFile("ada", "imported", "main", "index.js"),
+    );
+    expect(new TextDecoder().decode(bytes)).toContain("hi");
+  });
+
+  test("rejects non-network schemes in production (no allowLocal)", async () => {
+    const { host } = freshHost();
+    const remote = await makeRemote();
+    const r = await host.cloneFromRemote(`file://${remote}`, "ada", "x");
+    expect(r.status).toBe("error");
+  });
+
+  test("rejects a bogus URL and refuses to clobber", async () => {
+    const { host } = freshHost();
+    const remote = await makeRemote();
+    expect((await host.cloneFromRemote("not a url", "ada", "y")).status).toBe(
+      "error",
+    );
+    Result.unwrap(
+      await host.cloneFromRemote(`file://${remote}`, "ada", "z", {
+        allowLocal: true,
+      }),
+    );
+    expect(
+      (
+        await host.cloneFromRemote(`file://${remote}`, "ada", "z", {
+          allowLocal: true,
+        })
+      ).status,
+    ).toBe("error"); // already exists
+  });
+});
+
 describe("handleSmartHttp", () => {
   const RW = { read: true, write: true };
 

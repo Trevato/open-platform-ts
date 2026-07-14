@@ -121,4 +121,39 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX issue_comments_issue ON issue_comments (owner, repo, number, id);
   `,
+  `
+  -- An org is a shared OWNER namespace: repos and apps are owned by an org name
+  -- exactly as they are by a username (owner stays a bare string everywhere —
+  -- paths, hosts, gitops, mitosis are unchanged). Membership is what lets more
+  -- than one user write under that namespace. Names live in the SAME flat space
+  -- as usernames, so creation guards both directions against collision.
+  CREATE TABLE orgs (
+    name        TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    created_by  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE TABLE org_members (
+    org       TEXT NOT NULL REFERENCES orgs(name) ON DELETE CASCADE,
+    user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL DEFAULT 'member',   -- 'owner' | 'member'
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (org, user_id)
+  );
+  CREATE INDEX org_members_user ON org_members (user_id);
+  `,
+  `
+  -- Issue dependencies: a single "blocked-by" edge per pair. An issue with any
+  -- OPEN blocker is not worked by the crew until the blocker closes. Cycles are
+  -- rejected at write time (forge), so this graph is always a DAG.
+  CREATE TABLE issue_deps (
+    owner       TEXT NOT NULL,
+    repo        TEXT NOT NULL,
+    number      INTEGER NOT NULL,   -- the blocked issue
+    blocked_by  INTEGER NOT NULL,   -- the issue it waits on (same repo)
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (owner, repo, number, blocked_by)
+  );
+  CREATE INDEX issue_deps_repo ON issue_deps (owner, repo, number);
+  `,
 ];

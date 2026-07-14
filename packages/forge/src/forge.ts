@@ -9,6 +9,7 @@ import type { GitHost } from "@op/git";
 import type {
   IssueCommentRow,
   IssueRow,
+  OrgRow,
   PullRequestRow,
   RepoRow,
   Store,
@@ -65,6 +66,16 @@ export class Forge {
         new ForgeError({
           message: "password must not be empty",
           code: "invalid",
+        }),
+      );
+    }
+    // Usernames and org names share one flat owner space — a username may not
+    // shadow an existing org (the createOrg guard covers the other direction).
+    if (this.store.getOrg(username) !== null) {
+      return Result.err(
+        new ForgeError({
+          message: `'${username}' is already an org`,
+          code: "conflict",
         }),
       );
     }
@@ -156,7 +167,83 @@ export class Forge {
     if (this.store.getRepo(owner, repo) === null) return false;
     if (need === "read") return true;
     if (user === null) return false;
-    return user.username === owner || user.is_admin === 1;
+    return this.canWriteOwner(user, owner);
+  }
+
+  /** May this user write under an owner namespace? True for their own
+   *  username, any org they're a member of, or admin. The single seam every
+   *  write path (repos, PRs, issues, apps, imports) goes through. */
+  canWriteOwner(user: UserRow, owner: string): boolean {
+    if (user.is_admin === 1) return true;
+    if (user.username === owner) return true;
+    return this.store.isOrgMember(owner, user.id);
+  }
+
+  // ── orgs ─────────────────────────────────────────────────────────────
+  /** Create an org namespace. Fails closed on collisions in EITHER direction:
+   *  an org may not shadow a reserved name, an existing username, or an
+   *  existing org — usernames and org names share one flat owner space. */
+  async createOrg(
+    actor: UserRow,
+    name: string,
+    displayName = "",
+  ): Promise<Result<OrgRow, ForgeError>> {
+    if (!isValidName(name)) {
+      return Result.err(
+        new ForgeError({
+          message: `invalid org name: ${name}`,
+          code: "invalid",
+        }),
+      );
+    }
+    if (isReservedName(name)) {
+      return Result.err(
+        new ForgeError({ message: `'${name}' is reserved`, code: "invalid" }),
+      );
+    }
+    if (this.store.getUser(name) !== null) {
+      return Result.err(
+        new ForgeError({
+          message: `'${name}' is already a username`,
+          code: "conflict",
+        }),
+      );
+    }
+    try {
+      return Result.ok(this.store.createOrg(name, actor.id, displayName));
+    } catch (cause) {
+      return Result.err(mapSqliteError(cause, `org ${name}`));
+    }
+  }
+
+  /** Add a member to an org. Only an existing member may invite (M1: flat
+   *  membership — every member can add). */
+  addOrgMember(
+    actor: UserRow,
+    org: string,
+    username: string,
+  ): Result<void, ForgeError> {
+    if (this.store.getOrg(org) === null)
+      return Result.err(
+        new ForgeError({ message: `no such org: ${org}`, code: "not_found" }),
+      );
+    if (!this.canWriteOwner(actor, org))
+      return Result.err(
+        new ForgeError({
+          message: `${actor.username} is not a member of ${org}`,
+          code: "unauthorized",
+        }),
+      );
+    const target = this.store.getUser(username);
+    if (target === null)
+      return Result.err(
+        new ForgeError({
+          message: `no such user: ${username}`,
+          code: "not_found",
+        }),
+      );
+    this.store.addOrgMember(org, target.id);
+    return Result.ok(undefined);
   }
 
   async createRepo(
@@ -173,7 +260,7 @@ export class Forge {
         }),
       );
     }
-    if (actor.username !== owner && actor.is_admin !== 1) {
+    if (!this.canWriteOwner(actor, owner)) {
       return Result.err(
         new ForgeError({
           message: `${actor.username} may not create repos under ${owner}`,
@@ -198,10 +285,54 @@ export class Forge {
     return Result.ok(row);
   }
 
+  /**
+   * Import an external git repo (e.g. a GitHub URL) as a new owner/name repo.
+   * Same authz as createRepo (member of the owner namespace), then the repo
+   * row + a hardened bare clone. The crew tunes it to platform conventions
+   * afterward via an agent-import issue.
+   */
+  async importFromRemote(
+    actor: UserRow,
+    owner: string,
+    name: string,
+    url: string,
+  ): Promise<Result<RepoRow, ForgeError>> {
+    if (!isValidName(owner) || !isValidName(name))
+      return Result.err(
+        new ForgeError({
+          message: `invalid repo name: ${owner}/${name}`,
+          code: "invalid",
+        }),
+      );
+    if (!this.canWriteOwner(actor, owner))
+      return Result.err(
+        new ForgeError({
+          message: `${actor.username} may not create repos under ${owner}`,
+          code: "unauthorized",
+        }),
+      );
+    let row: RepoRow;
+    try {
+      row = this.store.createRepo(owner, name);
+    } catch (cause) {
+      return Result.err(mapSqliteError(cause, `repo ${owner}/${name}`));
+    }
+    const cloned = await this.git.cloneFromRemote(url, owner, name);
+    if (cloned.status === "error") {
+      // Roll back the row so a failed import leaves no phantom repo.
+      this.store.deleteRepo(owner, name);
+      return Result.err(
+        new ForgeError({ message: cloned.error.message, code: "invalid" }),
+      );
+    }
+    return Result.ok(row);
+  }
+
   async createFromTemplate(
     actor: UserRow,
     tpl: { owner: string; name: string },
     name: string,
+    owner: string = actor.username,
   ): Promise<Result<RepoRow, ForgeError>> {
     const tplRow = this.store.getRepo(tpl.owner, tpl.name);
     if (tplRow === null) {
@@ -220,9 +351,11 @@ export class Forge {
         }),
       );
     }
-    const created = await this.createRepo(actor, actor.username, name);
+    // createRepo enforces canWriteOwner(actor, owner) — an org owner is allowed
+    // only for members. Keep the git-side owner in lock-step with the repo row.
+    const created = await this.createRepo(actor, owner, name);
     if (created.status === "error") return created as Result<never, ForgeError>;
-    const gen = await this.git.createFromTemplate(tpl, actor.username, name);
+    const gen = await this.git.createFromTemplate(tpl, owner, name);
     if (gen.status === "error") {
       return Result.err(
         new ForgeError({ message: gen.error.message, code: "invalid" }),
@@ -388,6 +521,80 @@ export class Forge {
     const clean = labels.map((l) => l.trim().toLowerCase()).filter(Boolean);
     this.store.setIssueLabels(owner, repo, number, clean);
     return Result.ok({ ...issue, labels: clean.join(",") });
+  }
+
+  /**
+   * Declare that `number` is blocked by `blockedBy` (same repo). Rejects a
+   * self-edge and any edge that would create a cycle, so the dependency graph
+   * is always a DAG — the crew dispatcher can trust it to schedule work.
+   */
+  setIssueDep(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+    blockedBy: number,
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    if (number === blockedBy)
+      return Result.err(
+        new ForgeError({
+          message: "an issue cannot block itself",
+          code: "invalid",
+        }),
+      );
+    if (!this.store.getIssue(owner, repo, number))
+      return Result.err(
+        new ForgeError({
+          message: `issue #${number} not found`,
+          code: "not_found",
+        }),
+      );
+    if (!this.store.getIssue(owner, repo, blockedBy))
+      return Result.err(
+        new ForgeError({
+          message: `issue #${blockedBy} not found`,
+          code: "not_found",
+        }),
+      );
+    // Cycle check: adding number→blockedBy is illegal if blockedBy already
+    // depends (transitively) on number. Walk the blockers from blockedBy.
+    const seen = new Set<number>();
+    const stack = [blockedBy];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (cur === number)
+        return Result.err(
+          new ForgeError({
+            message: `that dependency would create a cycle (#${blockedBy} already depends on #${number})`,
+            code: "invalid",
+          }),
+        );
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const b of this.store.listIssueBlockers(owner, repo, cur))
+        stack.push(b);
+    }
+    this.store.addIssueDep(owner, repo, number, blockedBy);
+    return Result.ok(undefined);
+  }
+
+  removeIssueDep(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+    blockedBy: number,
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    this.store.removeIssueDep(owner, repo, number, blockedBy);
+    return Result.ok(undefined);
   }
 
   comment(

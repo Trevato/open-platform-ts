@@ -19,6 +19,20 @@ export interface RepoRow {
   created_at: number;
 }
 
+export interface OrgRow {
+  name: string;
+  display_name: string;
+  created_by: string;
+  created_at: number;
+}
+
+export interface OrgMemberRow {
+  org: string;
+  user_id: string;
+  role: string;
+  created_at: number;
+}
+
 export interface HostRow {
   host: string;
   owner: string;
@@ -262,6 +276,103 @@ export class Store {
     return this.db
       .query<RepoRow, []>("SELECT * FROM repos ORDER BY owner, name")
       .all();
+  }
+
+  listReposByOwner(owner: string): RepoRow[] {
+    return this.db
+      .query<
+        RepoRow,
+        [string]
+      >("SELECT * FROM repos WHERE owner = ? ORDER BY name")
+      .all(owner);
+  }
+
+  deleteRepo(owner: string, name: string): void {
+    this.db.run("DELETE FROM repos WHERE owner = ? AND name = ?", [
+      owner,
+      name,
+    ]);
+  }
+
+  // ── orgs ───────────────────────────────────────────────────────────────
+  createOrg(name: string, createdBy: string, displayName = ""): OrgRow {
+    const row: OrgRow = {
+      name,
+      display_name: displayName,
+      created_by: createdBy,
+      created_at: Date.now(),
+    };
+    // Create the org and enroll the creator as an owner-member atomically, so
+    // an org can never exist with nobody able to write to it.
+    this.db.transaction(() => {
+      this.db.run(
+        "INSERT INTO orgs (name, display_name, created_by, created_at) VALUES (?, ?, ?, ?)",
+        [row.name, row.display_name, row.created_by, row.created_at],
+      );
+      this.db.run(
+        "INSERT INTO org_members (org, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+        [name, createdBy, row.created_at],
+      );
+    })();
+    return row;
+  }
+
+  getOrg(name: string): OrgRow | null {
+    return (
+      this.db
+        .query<OrgRow, [string]>("SELECT * FROM orgs WHERE name = ?")
+        .get(name) ?? null
+    );
+  }
+
+  listOrgs(): OrgRow[] {
+    return this.db.query<OrgRow, []>("SELECT * FROM orgs ORDER BY name").all();
+  }
+
+  addOrgMember(org: string, userId: string, role = "member"): void {
+    this.db.run(
+      `INSERT INTO org_members (org, user_id, role, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(org, user_id) DO UPDATE SET role = excluded.role`,
+      [org, userId, role, Date.now()],
+    );
+  }
+
+  removeOrgMember(org: string, userId: string): void {
+    this.db.run("DELETE FROM org_members WHERE org = ? AND user_id = ?", [
+      org,
+      userId,
+    ]);
+  }
+
+  isOrgMember(org: string, userId: string): boolean {
+    return (
+      this.db
+        .query<
+          { n: number },
+          [string, string]
+        >("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND user_id = ?")
+        .get(org, userId)?.n === 1
+    );
+  }
+
+  listOrgMembers(org: string): Array<OrgMemberRow & { username: string }> {
+    return this.db
+      .query<OrgMemberRow & { username: string }, [string]>(
+        `SELECT m.*, u.username FROM org_members m
+         JOIN users u ON u.id = m.user_id
+         WHERE m.org = ? ORDER BY m.role DESC, u.username`,
+      )
+      .all(org);
+  }
+
+  listOrgsForUser(userId: string): OrgRow[] {
+    return this.db
+      .query<OrgRow, [string]>(
+        `SELECT o.* FROM orgs o
+         JOIN org_members m ON m.org = o.name
+         WHERE m.user_id = ? ORDER BY o.name`,
+      )
+      .all(userId);
   }
 
   // ── gate host table ────────────────────────────────────────────────────
@@ -586,6 +697,58 @@ export class Store {
       .query<IssueRow, []>("SELECT * FROM issues WHERE state = 'open'")
       .all()
       .filter((i) => i.labels.split(",").includes(label));
+  }
+
+  // ── issue dependencies ────────────────────────────────────────────────
+  addIssueDep(
+    owner: string,
+    repo: string,
+    number: number,
+    blockedBy: number,
+  ): void {
+    this.db.run(
+      `INSERT INTO issue_deps (owner, repo, number, blocked_by, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(owner, repo, number, blocked_by) DO NOTHING`,
+      [owner, repo, number, blockedBy, Date.now()],
+    );
+  }
+
+  removeIssueDep(
+    owner: string,
+    repo: string,
+    number: number,
+    blockedBy: number,
+  ): void {
+    this.db.run(
+      "DELETE FROM issue_deps WHERE owner = ? AND repo = ? AND number = ? AND blocked_by = ?",
+      [owner, repo, number, blockedBy],
+    );
+  }
+
+  /** The issue numbers this issue is blocked by (all edges, regardless of the
+   *  blocker's state). */
+  listIssueBlockers(owner: string, repo: string, number: number): number[] {
+    return this.db
+      .query<{ blocked_by: number }, [string, string, number]>(
+        "SELECT blocked_by FROM issue_deps WHERE owner = ? AND repo = ? AND number = ? ORDER BY blocked_by",
+      )
+      .all(owner, repo, number)
+      .map((r) => r.blocked_by);
+  }
+
+  /** Blockers that are still OPEN — the ones that actually gate crew work. */
+  openBlockers(owner: string, repo: string, number: number): number[] {
+    return this.db
+      .query<{ blocked_by: number }, [string, string, number]>(
+        `SELECT d.blocked_by FROM issue_deps d
+         JOIN issues i
+           ON i.owner = d.owner AND i.repo = d.repo AND i.number = d.blocked_by
+         WHERE d.owner = ? AND d.repo = ? AND d.number = ? AND i.state = 'open'
+         ORDER BY d.blocked_by`,
+      )
+      .all(owner, repo, number)
+      .map((r) => r.blocked_by);
   }
 
   setIssueState(

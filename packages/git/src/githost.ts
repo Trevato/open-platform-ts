@@ -567,4 +567,138 @@ export class GitHost {
     );
     return head.map(() => undefined);
   }
+
+  /**
+   * Import an EXTERNAL repo (e.g. a public GitHub URL) into the host as a fresh
+   * bare repo owned by owner/name. Hardened: only http(s)/git(+ssh) URLs, a
+   * hard wall-clock cap, single-branch shallow-ish history to bound size, and
+   * the repo's default branch renamed to `main` so the reconciler + preview
+   * pipeline treat it like any platform repo. The clone runs with terminal
+   * prompts disabled, so a private/auth-required URL fails fast rather than
+   * hanging. History is REWRITTEN to a single orphan-free import (kept as-is:
+   * the app's own history is legitimately theirs, unlike a template).
+   */
+  async cloneFromRemote(
+    url: string,
+    owner: string,
+    name: string,
+    opts: { timeoutMs?: number; depth?: number; allowLocal?: boolean } = {},
+  ): Promise<Result<void, GitError>> {
+    const op = "cloneFromRemote";
+    const dir = this.dir(op, owner, name);
+    if (dir.status === "error") return dir as Result<never, GitError>;
+    if (existsSync(dir.value))
+      return Result.err(
+        new GitError({ message: `repo already exists: ${owner}/${name}`, op }),
+      );
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return Result.err(new GitError({ message: `invalid URL: ${url}`, op }));
+    }
+    // Production accepts only network transports — never `file:`, which would
+    // let a member clone any git repo on the host. Tests opt into local repos.
+    const schemes = opts.allowLocal
+      ? ["https:", "http:", "git:", "file:"]
+      : ["https:", "http:", "git:"];
+    if (!schemes.includes(parsed.protocol))
+      return Result.err(
+        new GitError({
+          message: `unsupported scheme '${parsed.protocol}' (use https)`,
+          op,
+        }),
+      );
+    try {
+      await mkdir(dirname(dir.value), { recursive: true });
+    } catch (cause) {
+      return Result.err(new GitError({ message: String(cause), op }));
+    }
+
+    const timeoutMs = opts.timeoutMs ?? 120_000;
+    const depth = opts.depth ?? 0; // 0 = full history (a real app needs it)
+    const args = [
+      "clone",
+      "--bare",
+      "--single-branch",
+      ...(depth > 0 ? ["--depth", String(depth)] : []),
+      parsed.toString(),
+      dir.value,
+    ];
+    const clone = await this.gitWithTimeout(op, args, timeoutMs);
+    if (clone.status === "error") {
+      // Leave no half-written bare repo behind on failure.
+      await rm(dir.value, { recursive: true, force: true }).catch(() => {});
+      return clone as Result<never, GitError>;
+    }
+    // Normalize the default branch to main so downstream (specs, previews,
+    // crew branches off origin/main) is uniform regardless of the source repo.
+    const branch = await this.git(op, ["symbolic-ref", "--short", "HEAD"], {
+      cwd: dir.value,
+    });
+    const current =
+      branch.status === "ok"
+        ? new TextDecoder().decode(branch.value).trim()
+        : "";
+    if (current && current !== "main") {
+      await this.git(op, ["branch", "-m", current, "main"], {
+        cwd: dir.value,
+      });
+    }
+    const head = await this.git(
+      op,
+      ["symbolic-ref", "HEAD", "refs/heads/main"],
+      { cwd: dir.value },
+    );
+    return head.map(() => undefined);
+  }
+
+  // A git subprocess with a hard wall-clock kill — a hostile/slow remote must
+  // never hang the daemon. Mirrors git() but adds a timeout abort.
+  private async gitWithTimeout(
+    op: string,
+    args: string[],
+    timeoutMs: number,
+  ): Promise<Result<Uint8Array, GitError>> {
+    try {
+      const proc = Bun.spawn(["git", ...args], {
+        stdout: "pipe",
+        stderr: "pipe",
+        stdin: "ignore",
+        env: GIT_ENV,
+      });
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        proc.kill();
+      }, timeoutMs);
+      try {
+        const [stdout, stderrBytes, code] = await Promise.all([
+          collect(proc.stdout as ReadableStream<Uint8Array>),
+          collect(proc.stderr as ReadableStream<Uint8Array>),
+          proc.exited,
+        ]);
+        const stderr = new TextDecoder().decode(stderrBytes);
+        if (timedOut)
+          return Result.err(
+            new GitError({
+              message: `clone exceeded ${Math.round(timeoutMs / 1000)}s and was killed`,
+              op,
+            }),
+          );
+        if (code !== 0)
+          return Result.err(
+            new GitError({
+              message: `git clone exited ${code}: ${stderr.trim()}`,
+              op,
+            }),
+          );
+        return Result.ok(stdout);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (cause) {
+      return Result.err(new GitError({ message: String(cause), op }));
+    }
+  }
 }
