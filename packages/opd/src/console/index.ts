@@ -37,6 +37,15 @@ function origin(req: Request): string {
   return `${u.protocol}//${u.host}`;
 }
 
+// App status in plain words for a non-technical reader. The raw state still
+// drives the status-dot color; this is only the human-readable label.
+function friendlyState(state: string): string {
+  if (state === "running") return "working fine";
+  if (state === "error" || state === "failed" || state === "stopped")
+    return "needs attention";
+  return "starting up"; // pending / queued / building
+}
+
 // The crew pipeline, rendered from an issue's labels. Filed → Building →
 // Reviewing → Merged, each pending/active/done/failed.
 function pipeline(labels: string[]): string {
@@ -73,7 +82,7 @@ function pipeline(labels: string[]): string {
             : "";
     return `<li class="step ${s}"><span class="dot ${dot}"></span>${label}</li>`;
   };
-  return `<ol class="pipeline">${step(filed, "Filed")}${step(building, "Building")}${step(reviewing, "Reviewing")}${step(merged, "Merged")}</ol>`;
+  return `<ol class="pipeline">${step(filed, "Got it")}${step(building, "Building it")}${step(reviewing, "Making sure it works")}${step(merged, "Live")}</ol>`;
 }
 
 // Colorize a unified diff for the server-rendered PR view (no client parsing).
@@ -162,6 +171,8 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
       path === "/lineage" ||
       path === "/crew" ||
       path === "/platform" ||
+      path === "/orgs" ||
+      path.startsWith("/orgs/") ||
       path.startsWith("/apps/");
     if (!isConsolePath) return null;
 
@@ -185,30 +196,106 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
           return `<a class="card app" href="/apps/${esc(s.owner)}/${esc(s.app)}">
   <div class="name"><span class="dot ${esc(state)}" data-app="${esc(s.owner)}/${esc(s.app)}"></span>${esc(s.app)}</div>
   <div class="host">${esc(hostFor(s, deps.domain))}</div>
-  <div class="foot"><span class="state" data-state="${esc(s.owner)}/${esc(s.app)}">${esc(state)}</span></div>
+  <div class="foot"><span class="state" data-state="${esc(s.owner)}/${esc(s.app)}">${esc(friendlyState(state))}</span></div>
 </a>`;
         })
         .join("");
 
+      const starters: Array<{ label: string; text: string }> = [
+        {
+          label: "Vacation requests",
+          text: "I keep track of vacation requests for our office — who asked, the dates, and whether their manager approved",
+        },
+        {
+          label: "Visitor sign-in",
+          text: "I sign visitors in and out at the front desk and need a log of who was in the building and when",
+        },
+        {
+          label: "Supply requests",
+          text: "People ask me for office supplies — I need a request form and a list showing what's been ordered and what's arrived",
+        },
+        {
+          label: "Room bookings",
+          text: "I manage bookings for our two meeting rooms so people stop double-booking them",
+        },
+        {
+          label: "Expense claims",
+          text: "I collect expense claims, check the receipts, and record when each one is approved and when it's paid",
+        },
+        {
+          label: "Maintenance log",
+          text: "People report building problems to me — a leaky faucet, a broken printer — and I track each one until it's fixed",
+        },
+        {
+          label: "New-hire checklist",
+          text: "Every new hire needs the same steps done — badge, email, payroll, desk — and I track where each person is in the process",
+        },
+        {
+          label: "Client follow-ups",
+          text: "After each client call I write down what we promised, and I need reminders of who to follow up with and when",
+        },
+      ];
+      const starterChips = starters
+        .map(
+          (s) =>
+            `<button type="button" class="chip starter" data-fill="${esc(s.text)}">${esc(s.label)}</button>`,
+        )
+        .join("");
+
+      // The on-ramp leads: describe a task in plain words → a working tool.
+      const onramp = `
+<div class="onramp">
+  <h1 class="m0">${apps.length ? "Build another tool" : "What do you spend time on?"}</h1>
+  <p class="sub">${apps.length ? "Describe another task you handle, in your own words, and I'll build you a tool for it." : "Describe one task you handle, in your own words. You'll have a working tool for it — built, checked, and live — usually within a few minutes."}</p>
+  <form class="onramp-form" onsubmit="return onramp(event)">
+    <textarea id="desc" class="grow" rows="2" placeholder="For example: I keep track of vacation requests for our office — who asked, the dates, and whether their manager approved." required autofocus></textarea>
+    <button type="submit" id="onrampbtn">Build my tool</button>
+  </form>
+  <p class="onramp-note">You'll watch it get built and checked, step by step. Nothing is final — ask for changes any time.</p>
+  <div class="starters-label">Or start from something familiar — click one, then make it yours:</div>
+  <div class="starters" id="starters">${starterChips}</div>
+</div>`;
+
+      const advanced = `
+<details class="advanced">
+  <summary>More ways to start</summary>
+  <form class="newapp" onsubmit="return createApp(event)">
+    <input type="text" id="appname" class="mono grow" placeholder="or name a blank app" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits, hyphens" required>
+    <button type="submit" id="createbtn" class="secondary">Create blank app</button>
+  </form>
+  <form class="newapp" onsubmit="return importApp(event)">
+    <input type="text" id="importurl" class="mono grow" placeholder="https://github.com/owner/repo — import an existing repo" required>
+    <button type="submit" id="importbtn" class="secondary">Import from GitHub</button>
+  </form>
+</details>`;
+
       const body = `
-<h1>Apps</h1>
-<p class="sub">${apps.length} app${apps.length === 1 ? "" : "s"} on this platform. Name one and it ships in seconds — then file an issue and the build crew grows it.</p>
-<div class="card idcard">
-  <span class="k">Platform</span><span class="v">${esc(deps.domain)}</span>
-  <span class="k">Signed in</span><span class="v">${esc(user.username)}${user.is_admin ? " · admin" : ""}</span>
-  <span class="k">Sovereign key</span><span class="v">${esc(deps.sd.keyFile)}</span>
-</div>
-<form class="newapp" onsubmit="return createApp(event)">
-  <input type="text" id="appname" class="mono grow" placeholder="new-app-name" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits, hyphens" required>
-  <button type="submit" id="createbtn">Create app</button>
-</form>
-${apps.length ? `<div class="grid">${cards}</div>` : `<div class="empty">No apps yet. Name one above and it ships in seconds.</div>`}`;
+${onramp}
+${apps.length ? `<h2 class="mt">Your tools</h2><div class="grid">${cards}</div>` : ""}
+${advanced}`;
 
       return page(
         "Apps",
         chrome("apps", [{ label: "Apps" }]),
         body,
         `
+async function onramp(e){
+  e.preventDefault();
+  var d=document.getElementById('desc').value.trim();
+  if(!d) return false;
+  var b=document.getElementById('onrampbtn');b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/onramp',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({description:d})});
+  var j=await r.json().catch(function(){return{}});
+  if(r.ok){toast('building your tool…');location.href='/apps/'+j.owner+'/'+j.app+'/issues/'+j.issue;}
+  else {b.classList.remove('is-loading');b.disabled=false;toast(j.error||'failed');}
+  return false;
+}
+document.querySelectorAll('#starters .starter').forEach(function(c){
+  c.addEventListener('click',function(){var d=document.getElementById('desc');d.value=c.dataset.fill;d.focus();});
+});
+// Cmd/Ctrl+Enter submits the on-ramp from the textarea.
+(function(){var d=document.getElementById('desc');if(d)d.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){onramp(e);}});})();
+function friendly(s){return s==='running'?'working fine':(s==='error'||s==='failed'||s==='stopped'?'needs attention':'starting up');}
 async function createApp(e){
   e.preventDefault();
   var name=document.getElementById('appname').value.trim();
@@ -217,6 +304,17 @@ async function createApp(e){
   var r=await fetch('/api/v1/apps',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:name})});
   if(r.ok){toast('creating '+name+'…');location.href='/apps/'+${JSON.stringify(user.username)}+'/'+name;}
   else {b.classList.remove('is-loading');b.disabled=false;var j=await r.json().catch(function(){return{}});toast(j.error||'failed');}
+  return false;
+}
+async function importApp(e){
+  e.preventDefault();
+  var url=document.getElementById('importurl').value.trim();
+  if(!url) return false;
+  var b=document.getElementById('importbtn');b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/apps/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:url})});
+  var j=await r.json().catch(function(){return{}});
+  if(r.ok){toast('importing '+j.app+' — crew tuning it…');location.href='/apps/'+j.owner+'/'+j.app;}
+  else {b.classList.remove('is-loading');b.disabled=false;toast(j.error||'failed');}
   return false;
 }
 async function refresh(){
@@ -228,11 +326,159 @@ async function refresh(){
       var key=a.owner+'/'+a.app;
       var dot=document.querySelector('.dot[data-app="'+key+'"]');
       var st=document.querySelector('.state[data-state="'+key+'"]');
-      if(dot){dot.className='dot '+a.state;} if(st){st.textContent=a.state;}
+      if(dot){dot.className='dot '+a.state;} if(st){st.textContent=friendly(a.state);}
     });
   }catch(_){}
 }
 setInterval(refresh,2500);`,
+        { wide: true },
+      );
+    }
+
+    // ── orgs list ───────────────────────────────────────────────────────
+    if (path === "/orgs") {
+      const orgs = deps.store.listOrgsForUser(user.id);
+      const cards = orgs
+        .map((o) => {
+          const n = deps.store.listReposByOwner(o.name).length;
+          return `<a class="card app" href="/orgs/${esc(o.name)}">
+  <div class="name"><span class="dot running"></span>${esc(o.display_name || o.name)}</div>
+  <div class="host">${esc(o.name)}</div>
+  <div class="foot"><span class="state">${n} repo${n === 1 ? "" : "s"}</span></div>
+</a>`;
+        })
+        .join("");
+      const body = `
+<h1>Orgs</h1>
+<p class="sub">An org is a shared namespace for a business — its repos and apps live under one name, visible to every member. Create one to visualize a product's software in a single place.</p>
+<form class="newapp" onsubmit="return createOrg(event)">
+  <input type="text" id="orgname" class="mono grow" placeholder="acme" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits, hyphens" required>
+  <input type="text" id="orgdisplay" class="grow" placeholder="Display name (optional)">
+  <button type="submit" id="createorg">Create org</button>
+</form>
+${orgs.length ? `<div class="grid">${cards}</div>` : `<div class="empty">You're not in any orgs yet. Create one above.</div>`}`;
+      return page(
+        "Orgs",
+        chrome("orgs", [{ label: "Orgs" }]),
+        body,
+        `
+async function createOrg(e){
+  e.preventDefault();
+  var name=document.getElementById('orgname').value.trim();
+  var disp=document.getElementById('orgdisplay').value.trim();
+  if(!name) return false;
+  var b=document.getElementById('createorg');b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/orgs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:name,displayName:disp})});
+  if(r.ok){toast('created '+name);location.href='/orgs/'+name;}
+  else {b.classList.remove('is-loading');b.disabled=false;var j=await r.json().catch(function(){return{}});toast(j.error||'failed');}
+  return false;
+}`,
+        { wide: true },
+      );
+    }
+
+    // ── org overview ────────────────────────────────────────────────────
+    const orgM = path.match(/^\/orgs\/([^/]+)$/);
+    if (orgM) {
+      const orgName = orgM[1]!;
+      const org = deps.store.getOrg(orgName);
+      const back: Crumb[] = [
+        { label: "Orgs", href: "/orgs" },
+        { label: orgName },
+      ];
+      if (!org)
+        return page("Not found", chrome("orgs", back), notFound("/orgs"));
+      const isMember = deps.store.isOrgMember(orgName, user.id);
+      const members = deps.store.listOrgMembers(orgName);
+      const specs = await readAppSpecs(deps.git, deps.domain);
+      const apps =
+        specs.status === "ok"
+          ? specs.value.filter((s) => s.owner === orgName)
+          : [];
+      const repos = deps.store.listReposByOwner(orgName);
+      const appNames = new Set(apps.map((s) => s.app));
+      const appCards = apps
+        .map((s) => {
+          const st = deps.store.getAppStatus(s.owner, s.app);
+          const state = st?.state ?? "pending";
+          return `<a class="card app" href="/apps/${esc(s.owner)}/${esc(s.app)}">
+  <div class="name"><span class="dot ${esc(state)}"></span>${esc(s.app)}</div>
+  <div class="host">${esc(hostFor(s, deps.domain))}</div>
+  <div class="foot"><span class="state">${esc(state)}</span></div>
+</a>`;
+        })
+        .join("");
+      // Repos with no app spec (e.g. an imported/plain repo) still belong to the
+      // org's software picture — surface them so nothing is invisible.
+      const bareRepos = repos
+        .filter((r) => !appNames.has(r.name))
+        .map(
+          (r) =>
+            `<a class="card app" href="/apps/${esc(r.owner)}/${esc(r.name)}">
+  <div class="name"><span class="dot"></span>${esc(r.name)}</div>
+  <div class="host">repo</div>
+  <div class="foot"><span class="state">no app spec</span></div>
+</a>`,
+        )
+        .join("");
+      const memberPills = members
+        .map(
+          (m) =>
+            `<span class="pill">${esc(m.username)}${m.role === "owner" ? " · owner" : ""}</span>`,
+        )
+        .join(" ");
+      const body = `
+<h1 class="m0">${esc(org.display_name || org.name)}</h1>
+<p class="sub"><span class="mono">${esc(org.name)}</span> · ${apps.length} app${apps.length === 1 ? "" : "s"} · ${members.length} member${members.length === 1 ? "" : "s"}</p>
+
+<div class="card idcard">
+  <span class="k">Members</span><span class="v">${memberPills || "—"}</span>
+</div>
+
+${
+  isMember
+    ? `<form class="newapp" onsubmit="return createOrgApp(event)">
+  <input type="text" id="appname" class="mono grow" placeholder="new-app-name" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits, hyphens" required>
+  <button type="submit" id="createbtn">Create app in ${esc(org.name)}</button>
+</form>
+<form class="newapp" onsubmit="return addMember(event)">
+  <input type="text" id="newmember" class="mono grow" placeholder="username to add" required>
+  <button type="submit" id="addmemberbtn" class="secondary">Add member</button>
+</form>`
+    : `<div class="empty">You're not a member of ${esc(org.name)} — read-only view.</div>`
+}
+
+<h2 class="mt">Software</h2>
+${
+  apps.length || bareRepos
+    ? `<div class="grid">${appCards}${bareRepos}</div>`
+    : `<div class="empty">No software yet. ${isMember ? "Create an app above, or import a repo." : ""}</div>`
+}`;
+      return page(
+        org.display_name || org.name,
+        chrome("orgs", back),
+        body,
+        `
+var ORG=${JSON.stringify(orgName)};
+async function createOrgApp(e){
+  e.preventDefault();
+  var name=document.getElementById('appname').value.trim();if(!name)return false;
+  var b=document.getElementById('createbtn');b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/apps',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:name,owner:ORG})});
+  if(r.ok){toast('creating '+name+'…');location.href='/apps/'+ORG+'/'+name;}
+  else {b.classList.remove('is-loading');b.disabled=false;var j=await r.json().catch(function(){return{}});toast(j.error||'failed');}
+  return false;
+}
+async function addMember(e){
+  e.preventDefault();
+  var u=document.getElementById('newmember').value.trim();if(!u)return false;
+  var b=document.getElementById('addmemberbtn');b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/orgs/'+ORG+'/members',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:u})});
+  b.classList.remove('is-loading');b.disabled=false;
+  if(r.ok){toast('added '+u);location.reload();}
+  else {var j=await r.json().catch(function(){return{}});toast(j.error||'failed');}
+  return false;
+}`,
         { wide: true },
       );
     }
@@ -303,8 +549,8 @@ ${
   ${
     canWrite
       ? `<form class="newapp" id="composer-form" onsubmit="return compose(event)">
-    <input type="text" id="idea" class="grow" placeholder="Describe a feature — the crew drafts, builds, reviews & ships it" required>
-    <button type="submit" id="composebtn">Compose</button>
+    <input type="text" id="idea" class="grow" placeholder="Tell me what to change — I'll build it, check it works, and make it live" required>
+    <button type="submit" id="composebtn">Change it</button>
   </form>
   <div id="draft"></div>`
       : ""
@@ -360,7 +606,8 @@ function filt(list,text){var s=U.read();var q=s.q.toLowerCase();
 function issueRow(it){
   var labs=(it.labels||'').split(',').filter(Boolean).map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join('');
   var st=it.state==='closed'?'<span class="pill closed">closed</span>':'';
-  return '<a class="list-row" href="/apps/'+KEY+'/issues/'+it.number+'"><span class="num">#'+it.number+'</span><span class="ttl">'+escHtml(it.title)+'</span><span class="meta">'+labs+st+'</span></a>';
+  var blk=(it.openBlockers&&it.openBlockers.length)?'<span class="pill blocked" data-tip="Crew waits until these close">blocked by '+it.openBlockers.map(function(n){return '#'+n;}).join(', ')+'</span>':'';
+  return '<a class="list-row" href="/apps/'+KEY+'/issues/'+it.number+'"><span class="num">#'+it.number+'</span><span class="ttl">'+escHtml(it.title)+'</span><span class="meta">'+blk+labs+st+'</span></a>';
 }
 function prRow(pr){var s=pr.state||'open';
   return '<a class="list-row" href="/apps/'+KEY+'/pulls/'+pr.number+'"><span class="num">#'+pr.number+'</span><span class="ttl">'+escHtml(pr.title)+'</span><span class="meta"><span class="pill '+s+'">'+s+'</span></span></a>';
@@ -601,12 +848,12 @@ async function act(a,b){b.classList.add('is-loading');b.disabled=true;
       const labels = issue.labels.split(",").filter(Boolean);
       const isAgentWork = labels.some((l) => l.startsWith("agent-"));
       const body = `
-${isAgentWork ? pipeline(labels) : ""}
+<div id="pipeline-wrap">${isAgentWork ? pipeline(labels) : ""}</div>
 <div class="row between">
   <h1 class="m0">#${issue.number} <span style="font-weight:560">${esc(issue.title)}</span></h1>
-  <span class="pill ${issue.state === "open" ? "open" : "closed"}">${esc(issue.state)}</span>
+  <span class="pill ${issue.state === "open" ? "open" : "closed"}" id="statepill">${esc(issue.state)}</span>
 </div>
-<p class="sub">by ${esc(issue.author)} · ${labels.map((l) => `<span class="pill${l.startsWith("agent") ? " agent" : ""}">${esc(l)}</span>`).join(" ")}</p>
+<p class="sub">by ${esc(issue.author)} · <span id="labelpills">${labels.map((l) => `<span class="pill${l.startsWith("agent") ? " agent" : ""}">${esc(l)}</span>`).join(" ")}</span></p>
 ${issue.body ? `<div class="card pad prewrap" style="font-size:13.5px">${esc(issue.body)}</div>` : ""}
 
 ${
@@ -666,8 +913,30 @@ async function refresh(){
     var f=el;f.scrollTop=f.scrollHeight;return;}
   var fresh=cs.filter(function(c){return !seen[c.id]});
   if(fresh.length){if(el.querySelector('.mut'))el.innerHTML='';fresh.forEach(function(c){seen[c.id]=1;el.insertAdjacentHTML('beforeend',render(c));});}
-  // reflect pipeline/label changes without a reload
-  if(d.labels!==undefined && d.labels!==window._lbl){window._lbl=d.labels;}
+  // reflect pipeline/label/state changes LIVE, without a reload
+  if(d.labels!==undefined && d.labels!==window._lbl){
+    window._lbl=d.labels;
+    var labs=(d.labels||'').split(',').filter(Boolean);
+    var pw=document.getElementById('pipeline-wrap');
+    if(pw && labs.some(function(l){return l.indexOf('agent-')===0;})) pw.innerHTML=renderPipeline(labs);
+    var lp=document.getElementById('labelpills');
+    if(lp) lp.innerHTML=labs.map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join(' ');
+  }
+  if(d.state!==undefined){var sp=document.getElementById('statepill');if(sp && sp.textContent!==d.state){sp.textContent=d.state;sp.className='pill '+(d.state==='open'?'open':'closed');}}
+}
+// Client mirror of the server pipeline() so the tracker advances live.
+function renderPipeline(labs){
+  function has(l){return labs.indexOf(l)>=0;}
+  var filed='done',building='pending',reviewing='pending',merged='pending';
+  if(has('agent-shipped')){building=reviewing='done';merged='done';}
+  else if(has('agent-review-failed')){building='done';reviewing='failed';}
+  else if(has('agent-reviewing')){building='done';reviewing='active';}
+  else if(has('agent-reworking')){building='active';reviewing='pending';}
+  else if(has('agent-building')){building='active';}
+  else if(has('agent-failed')){building='failed';}
+  else if(has('agent-work')){filed='active';}
+  function step(s,label){var dot=s==='active'?'building':(s==='failed'?'error':(s==='done'?'running':''));return '<li class="step '+s+'"><span class="dot '+dot+'"></span>'+label+'</li>';}
+  return '<ol class="pipeline">'+step(filed,'Got it')+step(building,'Building it')+step(reviewing,'Making sure it works')+step(merged,'Live')+'</ol>';
 }
 async function assign(b){b.classList.add('is-loading');b.disabled=true;
   var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/labels',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({labels:['agent-work']})});
