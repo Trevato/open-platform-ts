@@ -6,6 +6,29 @@ shaped for the caged builder (single-file `server.ts`, `bun:sqlite`, `PORT`,
 OIDC) and phrased so the adversary reviewer has something concrete to attack —
 the safety line in each spec is the reviewer's checklist.
 
+## Platform backlog — from the Blockhaven demo (2026-07-14)
+
+Friction the personas hit building a real org (website + shop + 3 minecraft
+servers) on a live platform. Filed as intent work items on `plat/platform`;
+recorded here so they survive in git.
+
+- **Deploy feedback in the git-push window.** A push gives only the ref-update
+  line, then a silent gap until the app answers. Stream build progress in the
+  push sideband, or expose a per-app deploy-status endpoint.
+- **Distinguish scaffold from feature-live.** After createApp an app shows
+  `state=running` while serving the create-time template (200s on every path).
+  Expose the deployed ref / a scaffold flag; have the scaffold 404 unknown
+  paths.
+- **Expose assigned public TCP ports in the API.** createApp returns host +
+  cloneUrl but not the `containerPort→publicPort` mapping; the join port is
+  only discoverable from the app's own `/api/status`.
+- **Integration map: pending edges from open changes.** The map reads deployed
+  main, so `consumes` on unmerged branches are invisible until ship — a
+  reviewer can't preview the future graph.
+- **Gate order-listing when app auth lands.** Under M1 public-read, an app's
+  `/api/orders` is open; when app-session/admin auth surfaces, gate listing
+  while leaving `/api/products` public.
+
 File any of these from an app's **Issues** box with the `agent-work` label and
 watch the crew build → review → ship it.
 
