@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@op/store";
+import { MIGRATIONS } from "../src/schema.ts";
 
 let dirs: string[] = [];
 function freshStore(): Store {
@@ -10,6 +12,10 @@ function freshStore(): Store {
   dirs.push(dir);
   return new Store(join(dir, "db.sqlite"));
 }
+
+// The work-items migration (the last entry) is the one that backfills
+// legacy issues → phases. Everything before it is the pre-work-item schema.
+const WORK_MIGRATION = MIGRATIONS.length - 1;
 
 afterEach(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -88,6 +94,70 @@ describe("Store", () => {
     s.deleteHostsFor("ada", "hello");
     expect(s.resolveHost("hello-ada.plat.localtest.me")).toBeNull();
     s.close();
+  });
+
+  test("migration 9 backfill: labels + close state → correct phases", () => {
+    // Stand up the pre-work-item schema, seed legacy-shaped rows, then run the
+    // backfill migration and assert every phase mapping — including the case
+    // the adversarial pass caught: a CLOSED issue still carrying a stale
+    // in-flight label must land 'closed', not 'parked'.
+    const dir = mkdtempSync(join(tmpdir(), "op-store-mig-"));
+    dirs.push(dir);
+    const db = new Database(join(dir, "db.sqlite"), { create: true });
+    for (let i = 0; i < WORK_MIGRATION; i++) db.exec(MIGRATIONS[i]!);
+
+    const ins = (
+      n: number,
+      state: string,
+      labels: string,
+      pr?: { head: string; state: string },
+    ) => {
+      db.run(
+        `INSERT INTO issues (id, owner, repo, number, title, body, state, labels, author, created_at)
+         VALUES (?, 'o', 'r', ?, 't', '', ?, ?, 'a', ?)`,
+        [`iss${n}`, n, state, labels, n],
+      );
+      if (pr)
+        db.run(
+          `INSERT INTO pull_requests (id, owner, repo, number, title, head_ref, base_ref, state, author, created_at)
+           VALUES (?, 'o', 'r', ?, 't', ?, 'main', ?, 'a', ?)`,
+          [`pr${n}`, n, pr.head, pr.state, n],
+        );
+    };
+    ins(1, "closed", "agent-shipped", {
+      head: "agent/issue-1",
+      state: "merged",
+    }); // shipped
+    ins(2, "closed", "agent-building"); // interrupted then CLOSED → closed (the bug)
+    ins(3, "open", "agent-review-failed"); // parked
+    ins(4, "open", "agent-reviewing"); // parked (in-flight, open)
+    ins(5, "open", "agent-work,feature"); // queued
+    ins(6, "closed", "agent-work"); // closed wins over the queue verb
+    ins(7, "open", "bug"); // plain intent
+    ins(8, "closed", ""); // plainly closed
+
+    db.exec(MIGRATIONS[WORK_MIGRATION]!);
+    const phase = (n: number) =>
+      db
+        .query<
+          { phase: string; labels: string },
+          [number]
+        >("SELECT phase, labels FROM issues WHERE number = ?")
+        .get(n);
+
+    expect(phase(1)?.phase).toBe("shipped");
+    expect(phase(2)?.phase).toBe("closed"); // NOT parked
+    expect(phase(3)?.phase).toBe("parked");
+    expect(phase(4)?.phase).toBe("parked");
+    expect(phase(5)?.phase).toBe("queued");
+    expect(phase(6)?.phase).toBe("closed");
+    expect(phase(7)?.phase).toBe("intent");
+    expect(phase(8)?.phase).toBe("closed");
+    // Dead phase labels are stripped; agent-work survives as the verb.
+    expect(phase(1)?.labels).not.toContain("agent-shipped");
+    expect(phase(5)?.labels.split(",")).toContain("agent-work");
+    expect(phase(5)?.labels.split(",")).toContain("feature");
+    db.close();
   });
 
   test("work items: legal-edge phase machine, CAS claim, derived state", () => {

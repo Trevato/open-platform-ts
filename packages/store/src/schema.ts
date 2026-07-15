@@ -229,15 +229,18 @@ export const MIGRATIONS: readonly string[] = [
       WHERE pr.owner = issues.owner AND pr.repo = issues.repo
         AND pr.head_ref = 'agent/issue-' || issues.number);
 
-  -- 2) Labels → phase. Active phases park as 'migrated', never guessed.
+  -- 2) Labels → phase. A closed issue is closed regardless of any stale
+  -- in-flight label an interrupted attempt left behind — state wins over
+  -- transient labels. Only agent-shipped outranks it (that IS the closed,
+  -- terminal-success phase). Active labels on OPEN issues park as 'migrated'.
   UPDATE issues SET phase = CASE
     WHEN instr(',' || labels || ',', ',agent-shipped,') > 0 THEN 'shipped'
+    WHEN state = 'closed' THEN 'closed'
     WHEN instr(',' || labels || ',', ',agent-failed,') > 0
       OR instr(',' || labels || ',', ',agent-review-failed,') > 0 THEN 'parked'
     WHEN instr(',' || labels || ',', ',agent-building,') > 0
       OR instr(',' || labels || ',', ',agent-reviewing,') > 0
       OR instr(',' || labels || ',', ',agent-reworking,') > 0 THEN 'parked'
-    WHEN state = 'closed' THEN 'closed'
     WHEN instr(',' || labels || ',', ',agent-work,') > 0 THEN 'queued'
     ELSE 'intent' END;
   UPDATE issues SET parked_reason = 'migrated' WHERE phase = 'parked';

@@ -94,6 +94,60 @@ describe.skipIf(!sock)("capabilities: op.json shapes the runtime", () => {
     const admin = `plat:${platform.freshAdminPassword}`;
     const caFile = join(base, "p", "certs", "ca.crt");
 
+    // Give this instance its OWN public-TCP range so it never fights another
+    // platform for a real host port (the loopback HTTP ports are OS-assigned,
+    // but public TCP ports are fixed — a live platform on the same box uses
+    // the genesis default 25500-25599). Commit it to plat/platform OVER
+    // smart-HTTP so the push hook fires and hot-reloads the policy; a direct
+    // bare-repo push wouldn't emit the event.
+    const cfgWork = await mkdtemp(join(tmpdir(), "op-caps-cfg-"));
+    cleanup.push(() => rm(cfgWork, { recursive: true, force: true }));
+    const cfgEnv = {
+      ...process.env,
+      GIT_SSL_CAINFO: caFile,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    const cfgGit = async (...argv: string[]) => {
+      await Bun.spawn(["git", ...argv], {
+        cwd: cfgWork,
+        env: cfgEnv,
+        stdout: "ignore",
+        stderr: "ignore",
+      }).exited;
+    };
+    await cfgGit(
+      "clone",
+      "-q",
+      `https://${admin}@${domain}:${httpsPort}/plat/platform.git`,
+      "cfg",
+    );
+    const cfgDir = join(cfgWork, "cfg");
+    const cfg = JSON.parse(
+      await Bun.file(join(cfgDir, "platform.json")).text(),
+    );
+    cfg.apps = { ...(cfg.apps ?? {}), tcpPortRange: [27700, 27799] };
+    await Bun.write(
+      join(cfgDir, "platform.json"),
+      JSON.stringify(cfg, null, 2),
+    );
+    await cfgGit("-C", cfgDir, "add", "-A");
+    await cfgGit(
+      "-C",
+      cfgDir,
+      "-c",
+      "user.email=e2e@test",
+      "-c",
+      "user.name=e2e",
+      "commit",
+      "-q",
+      "-m",
+      "test: isolated tcp range",
+    );
+    await cfgGit("-C", cfgDir, "push", "-q", "origin", "main");
+    // The reload is fire-and-forget on the push hook; give it a moment, then
+    // the deploy below asserts the assigned port lands in the new range.
+    await Bun.sleep(1_500);
+
     const created = await fetch(`${api}/api/v1/apps`, {
       method: "POST",
       tls: { ca },
@@ -169,11 +223,14 @@ describe.skipIf(!sock)("capabilities: op.json shapes the runtime", () => {
     });
     expect(body.app).toBe("echoer");
 
-    // The platform allocated a sticky public port and the relay carries bytes.
+    // The platform allocated a sticky public port from THIS instance's range
+    // (the hot-reloaded 27700-27799, isolated from any other platform) and
+    // the relay carries bytes.
     const ports = platform.store.listAppPortsFor("plat", "echoer");
     expect(ports).toHaveLength(1);
     const pub = ports[0]!.public_port;
-    expect(pub).toBeGreaterThanOrEqual(25500);
+    expect(pub).toBeGreaterThanOrEqual(27700);
+    expect(pub).toBeLessThanOrEqual(27799);
     expect(body.tcp).toBe(String(pub));
     expect(await tcpEcho(pub, "hello")).toBe("echo:hello");
 

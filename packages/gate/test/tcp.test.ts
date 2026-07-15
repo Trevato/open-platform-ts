@@ -128,4 +128,39 @@ describe("TcpGate", () => {
     gate.sync(route(second.port));
     expect(await roundTrip(pub, "two")).toBe("echo:two");
   });
+
+  test("self-heals when the public port is briefly held elsewhere", async () => {
+    const upstream = await echoServer();
+    const pub = await freePort();
+    // Squat on the public port (same wildcard bind the gate uses, so it
+    // reliably conflicts despite SO_REUSEADDR) → the first bind fails async.
+    const squatter = createServer();
+    await new Promise<void>((r) => squatter.listen(pub, r));
+
+    const gate = new TcpGate({ retryMs: 150 });
+    cleanups.push(
+      () => gate.stop(),
+      () => upstream.server.close(),
+      () => squatter.close(),
+    );
+    gate.sync([
+      {
+        public_port: pub,
+        owner: "o",
+        app: "a",
+        container_port: 25565,
+        host_port: upstream.port,
+      },
+    ]);
+    // Bind can't take while the squatter holds the port — no phantom active.
+    await Bun.sleep(120);
+    expect(gate.activePorts()).toEqual([]);
+
+    // Release it; the retry should claim it and start relaying.
+    await new Promise<void>((r) => squatter.close(() => r()));
+    for (let i = 0; i < 60 && gate.activePorts().length === 0; i++)
+      await Bun.sleep(20);
+    expect(gate.activePorts()).toEqual([pub]);
+    expect(await roundTrip(pub, "healed")).toBe("echo:healed");
+  });
 });
