@@ -12,6 +12,7 @@
 //                platform's app-to-app channel. Players join through the hub;
 //                Paper rejects any direct connection that skipped the proxy.
 import { Database } from "bun:sqlite";
+import { rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { join } from "node:path";
 
@@ -44,6 +45,10 @@ type Field =
 const SCHEMA: Record<string, Field> = {
   role: { kind: "enum", options: ["standalone", "backend"], def: "standalone" },
   motd: { kind: "text", max: 120, def: "" },
+  // "flat" is a superflat world — a clean, predictable hub floor (players
+  // always spawn on flat ground). "normal" is generated terrain. Changing it
+  // only affects newly generated chunks, so pair it with "Reset world".
+  worldType: { kind: "enum", options: ["normal", "flat"], def: "normal" },
   gamemode: {
     kind: "enum",
     options: ["survival", "creative", "adventure", "spectator"],
@@ -159,6 +164,7 @@ async function fetchForwardingSecret(): Promise<string | null> {
 async function writeServerFiles(): Promise<{ ok: boolean; error?: string }> {
   await Bun.write(join(DATA_DIR, "eula.txt"), "eula=true\n");
   const backend = isBackend();
+  const flat = setting("worldType") === "flat";
   const props = [
     `server-port=${MC_PORT}`,
     `motd=${motdText()}`,
@@ -166,6 +172,16 @@ async function writeServerFiles(): Promise<{ ok: boolean; error?: string }> {
     `online-mode=${backend ? "false" : "true"}`,
     `gamemode=${setting("gamemode")}`,
     `difficulty=${setting("difficulty")}`,
+    // Superflat for a hub: a clean floor + no structures poking through.
+    // level-type=flat needs generator-settings (a layer stack), or the world
+    // fails to generate ("No key layers"). bedrock+dirt+grass, plains biome.
+    `level-type=minecraft\\:${flat ? "flat" : "normal"}`,
+    ...(flat
+      ? [
+          `generator-settings={"layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":3},{"block":"minecraft:grass_block","height":1}],"biome":"minecraft:plains"}`,
+        ]
+      : []),
+    `generate-structures=${!flat}`,
     `max-players=${setting("maxPlayers")}`,
     `view-distance=${setting("viewDistance")}`,
     `pvp=${setting<boolean>("pvp")}`,
@@ -432,6 +448,18 @@ Bun.serve({
         await stopServer();
         return Response.json({ ok: true });
       }
+      if (path === "/api/reset-world") {
+        // Wipe the world dirs and let the next start regenerate with the
+        // current level-type. Destructive by design — an operator picks it
+        // to switch a lobby to superflat or clear a griefed hub.
+        const wasRunning = !!proc;
+        await stopServer();
+        for (const w of ["world", "world_nether", "world_the_end"])
+          await rm(join(DATA_DIR, w), { recursive: true, force: true });
+        pushLog(`[wrapper] ${actor} reset the world (${setting("worldType")})`);
+        if (wasRunning) await startServer();
+        return Response.json({ ok: true, worldType: setting("worldType") });
+      }
       if (path === "/api/command") {
         const body = (await req.json().catch(() => ({}))) as {
           command?: string;
@@ -550,6 +578,8 @@ ${
   <form class="settings" id="settings" onsubmit="return saveSettings(event)">
     <label>Role
       <select name="role">${optionTags(["standalone", "backend"], s("role"))}</select></label>
+    <label>World type
+      <select name="worldType">${optionTags((SCHEMA.worldType as { options: string[] }).options, s("worldType"))}</select></label>
     <label>Game mode
       <select name="gamemode">${optionTags((SCHEMA.gamemode as { options: string[] }).options, s("gamemode"))}</select></label>
     <label>Difficulty
@@ -563,7 +593,8 @@ ${
     <label class="full">MOTD
       <input type="text" name="motd" value="${s("motd")}" maxlength="120" placeholder="${esc(motdText())}"></label>
     <div class="full"><button type="submit">Save settings</button>
-      <span class="muted">Game mode & difficulty apply live; the rest on next restart.</span></div>
+      <button type="button" class="ghost" onclick="resetWorld()">Reset world</button>
+      <span class="muted">Game mode & difficulty apply live; the rest on next restart. Reset world regenerates the map with the current world type.</span></div>
   </form>
 </div>`
     : ""
@@ -578,6 +609,10 @@ function saveSettings(e){ e.preventDefault();
   fetch('/api/settings', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
     .then(r => r.json()).then(function(){ location.reload(); });
   return false;
+}
+function resetWorld(){
+  if (!confirm('Delete the world and regenerate it? This cannot be undone.')) return;
+  fetch('/api/reset-world', { method:'POST' }).then(function(){ setTimeout(function(){ location.reload(); }, 1500); });
 }
 setInterval(function () {
   fetch("/api/log").then(r => r.json()).then(d => { document.getElementById("log").textContent = d.lines.join("\\n") || "(no output yet)"; });
