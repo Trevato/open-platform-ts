@@ -1,0 +1,24 @@
+{
+  "resources": { "memoryMb": 1792, "cpus": 2 },
+  "tcpPorts": [25565],
+  "assets": [
+    {
+      "url": "https://fill-data.papermc.io/v1/objects/5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba/paper-1.21.11-132.jar",
+      "dest": "server.jar",
+      "sha256": "5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba"
+    }
+  ],
+  "provides": [
+    {
+      "name": "mc-control",
+      "path": "/api",
+      "description": "start/stop/console/settings for this Minecraft server"
+    },
+    {
+      "name": "server-status",
+      "path": "/api/status",
+      "description": "live state, players, gamemode, join or hub address"
+    }
+  ],
+  "consumes": [{ "app": "hub" }]
+}

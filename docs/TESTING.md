@@ -164,6 +164,26 @@ OP_SIM_FLEET=1 bun test test/sim               # + germinate a daughter, check s
 The seed prints at the start of every run and is embedded in each failure, so a
 red run reproduces exactly. See `test/sim/README.md`.
 
+### A Minecraft server network (the capability layer, end to end)
+
+`genesis/examples/minecraft-network/` runs a real Velocity network as platform
+apps — proof that `op.json` (assets, TCP ports, resources), the integration
+map, and `peerFetch` auth compose into something substantial with **zero
+platform changes**.
+
+- `server/` — a Minecraft server app: Paper via an `op.json` asset, a settings
+  UI for role/gamemode/MOTD, TCP `25565`. Role `backend` joins a network with
+  modern forwarding; `standalone` is publicly joinable on its own.
+- `hub/` — a Velocity proxy app that `consumes` the backends, holds the
+  forwarding secret, and hands it to its backends over `peerFetch`. One public
+  port; `/server` hops between worlds; the integration map draws the topology.
+
+Create one `hub` + N `server` apps under an org, set each server's role to
+`backend` in its settings, start the backends then the hub — players connect to
+the hub's port. A direct login to a backend is rejected with a
+`velocity:player_info` challenge (modern forwarding closes the offline-mode
+spoof hole). See the example's `README.md`.
+
 ### Whole-loop sanity
 
 ```sh
@@ -171,6 +191,7 @@ bun run typecheck && bun test packages   # all unit tests (fast, ~22s)
 bun run test:m1                          # <1min full platform loop
 bun test test/migration.e2e.test.ts      # seller → client app migration (~15s)
 bun test test/console.e2e.test.ts        # orgs + deps + design render (~3s)
+bun test test/capabilities.e2e.test.ts   # op.json resources/TCP/fail-closed (~20s)
 ```
 
 Full walkthrough of the business story: **`docs/DEMO.md`**.
