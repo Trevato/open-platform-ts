@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createLog, Result, stateDir } from "@op/core";
 import { Forge } from "@op/forge";
 import { GitHost } from "@op/git";
-import { verifyIdToken } from "@op/identity";
+import { verifyAccessToken, verifyIdToken } from "@op/identity";
 import { Store } from "@op/store";
 import { oidcRouter } from "../src/oidc.ts";
 import { ensureSigningKey, provisionAppClient } from "../src/oidc-clients.ts";
@@ -34,7 +34,7 @@ async function harness() {
   const key = await ensureSigningKey(sd);
   const client = await provisionAppClient(store, "ada", "blog", APP_ORIGIN);
   const router = oidcRouter({ forge, store, key, log: createLog("oidc") });
-  return { router, key, user, session, client };
+  return { router, key, user, session, client, store };
 }
 
 function pkce() {
@@ -254,5 +254,80 @@ describe("token + userinfo (full code exchange)", () => {
       code_verifier: verifier,
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("client_credentials (app-to-app)", () => {
+  const SHOP = "https://shop-ada.plat.localtest.me:18443";
+
+  test("mints an aud-bound app token that verifies ONLY at its target", async () => {
+    const h = await harness();
+    const res = await token(h.router, {
+      grant_type: "client_credentials",
+      client_id: h.client.clientId,
+      client_secret: h.client.clientSecret,
+      resource: SHOP,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      access_token: string;
+      expires_in: number;
+    };
+    expect(body.expires_in).toBe(600);
+
+    // Verifies at the target origin with the unforgeable app: subject…
+    const at = Result.unwrap(
+      await verifyAccessToken(body.access_token, h.key, ISS, SHOP),
+    );
+    expect(at.sub).toBe("app:ada/blog");
+    expect(at.scope).toBe("app");
+
+    // …and at ANY other audience it verifies as nothing: replayed against a
+    // different app or the userinfo endpoint, the confused deputy is dead.
+    expect(
+      (
+        await verifyAccessToken(
+          body.access_token,
+          h.key,
+          ISS,
+          "https://hub-ada.plat.localtest.me:18443",
+        )
+      ).status,
+    ).toBe("error");
+    expect(
+      (await verifyAccessToken(body.access_token, h.key, ISS)).status,
+    ).toBe("error");
+  });
+
+  test("preview clients self-identify; foreign resources are rejected", async () => {
+    const h = await harness();
+    const preview = await provisionAppClient(
+      h.store,
+      "ada",
+      "blog",
+      APP_ORIGIN,
+      "pr-7",
+    );
+    const res = await token(h.router, {
+      grant_type: "client_credentials",
+      client_id: preview.clientId,
+      client_secret: preview.clientSecret,
+      resource: SHOP,
+    });
+    expect(res.status).toBe(200);
+    const { access_token } = (await res.json()) as { access_token: string };
+    const at = Result.unwrap(
+      await verifyAccessToken(access_token, h.key, ISS, SHOP),
+    );
+    expect(at.sub).toBe("app:ada/blog@pr-7"); // providers can tell previews apart
+
+    // A resource outside the platform's domain is not a target we mint for.
+    const foreign = await token(h.router, {
+      grant_type: "client_credentials",
+      client_id: h.client.clientId,
+      client_secret: h.client.clientSecret,
+      resource: "https://evil.example.com",
+    });
+    expect(foreign.status).toBe(400);
   });
 });

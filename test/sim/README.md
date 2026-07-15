@@ -38,7 +38,7 @@ found the suite skips (like the other e2e tests).
 | `OP_SIM_ROUNDS`  | `3`             | operation batches; invariants run after each           |
 | `OP_SIM_STEPS`   | `1` (heavy `2`) | persona steps per batch                                |
 | `OP_SIM_TENANTS` | `4`             | tenants provisioned (min 4)                            |
-| `OP_SIM_HEAVY=1` | off             | add a 2nd builder + the forker (PR→preview deploys)    |
+| `OP_SIM_HEAVY=1` | off             | add a 2nd builder + the forker (work-item previews)    |
 | `OP_SIM_FLEET=1` | off             | germinate a sovereign daughter + run fleet-sovereignty |
 | `OP_SIM_HARD_MS` | `300000`        | hard wall-clock ceiling                                |
 
@@ -56,8 +56,11 @@ observed state (never the RNG):
    are allowed (the _only_ thing that crosses tenants in M1); every cross-tenant
    **write** is denied; a tenant keeps write on its own repos. The `attacker`
    persona independently confirms this live over HTTP + git (push / snapshot /
-   PR / label / token-mint / user-create against another tenant → all `403`), and
-   a `2xx` on any of those is flagged a breach with the seed.
+   attach-change / queue / label / token-mint / user-create against another
+   tenant → all `403`), and a `2xx` on any of those is flagged a breach with
+   the seed. Two more probes attack the work-item phase machine itself: an
+   illegal phase jump via the API must be rejected with state unchanged, and a
+   label write must never move `phase` (labels are taxonomy only).
 2. **Content isolation** — every `builder`/`forker` push writes a unique,
    owner-tagged sentinel file; the checker greps every _other_ repo's full object
    graph and asserts the sentinel appears nowhere but its home repo.
@@ -76,6 +79,15 @@ observed state (never the RNG):
 6. **Fleet sovereignty** (`OP_SIM_FLEET=1`) — the mother's key opens **nothing**
    in a germinated daughter (HEAD _and_ full git history), the keys differ, and
    the lineage ledger grows by exactly one generation.
+7. **Work-item coherence** — every item sits in exactly one known phase; the
+   derived open/closed `state` always equals the phase derivation (guards the
+   compat mirror); `shipped` ⇒ change merged, `closed` with a change ⇒ change
+   closed, `reviewing`/`reworking` ⇒ change open; the attempts ledger is
+   append-only, numbered `1..n`.
+8. **Preview coupling** — a live preview container implies its work item's
+   change is still `open` (with a settle window for the reconciler's async
+   teardown). The ⇐ direction — open change ⇒ preview serving — is
+   build-latency-bound and proven by `test/preview.e2e.test.ts` instead.
 
 ## Files
 

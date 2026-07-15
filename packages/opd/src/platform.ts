@@ -313,6 +313,7 @@ export class Platform {
                   idea,
                   oauthToken: claudeToken,
                   log,
+                  loadAgent: (role) => platformConfig.loadAgent(role),
                   ...(context ? { context } : {}),
                   ...(onEvent ? { onEvent } : {}),
                 });
@@ -330,6 +331,7 @@ export class Platform {
           git,
           sd,
           domain: opts.domain,
+          appPolicy: () => platformConfig.get().apps,
         });
         // API/git win first (machines); OIDC before the console; the console is
         // the human face fallback.

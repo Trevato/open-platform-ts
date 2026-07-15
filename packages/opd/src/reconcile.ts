@@ -532,30 +532,34 @@ export class Reconciler {
     if (changed) this.deps.onPortsChanged?.();
   }
 
-  /** Reconcile a preview per open PR whose repo is a deployed app. */
+  /** Reconcile a preview per work item with an open change on a deployed app. */
   private async convergePreviews(specs: AppSpec[]): Promise<void> {
     const byRepo = new Map(
       specs.map((s) => [`${s.repo.owner}/${s.repo.name}`, s]),
     );
-    for (const pr of this.deps.store.listOpenPrs()) {
-      const spec = byRepo.get(`${pr.owner}/${pr.repo}`);
-      if (spec) await this.convergePreview(spec, pr);
+    for (const work of this.deps.store.listOpenChanges()) {
+      const spec = byRepo.get(`${work.owner}/${work.repo}`);
+      if (spec && work.head_ref)
+        await this.convergePreview(spec, {
+          number: work.number,
+          head_ref: work.head_ref,
+        });
     }
   }
 
-  /** Stop containers whose spec/PR is gone; tear down orphaned preview data. */
+  /** Stop containers whose spec/change is gone; tear down orphaned preview data. */
   private async prune(specs: AppSpec[]): Promise<void> {
     const { engine, store, log } = this.deps;
     const wantApp = new Set(specs.map((s) => `${s.owner}/${s.app}`));
     const wantPreview = new Set(
       store
-        .listOpenPrs()
-        .filter((pr) =>
+        .listOpenChanges()
+        .filter((work) =>
           specs.some(
-            (s) => s.repo.owner === pr.owner && s.repo.name === pr.repo,
+            (s) => s.repo.owner === work.owner && s.repo.name === work.repo,
           ),
         )
-        .map((pr) => `${pr.owner}/${pr.repo}#pr-${pr.number}`),
+        .map((work) => `${work.owner}/${work.repo}#pr-${work.number}`),
     );
     const running = await engine.listPlatformContainers(this.deps.platformId);
     if (running.status === "error") return;

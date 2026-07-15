@@ -489,16 +489,16 @@ export const churner = definePersona<ChurnState>(
   ],
 );
 
-// ── forker: open PRs → get previews → merge/close ─────────────────────────
+// ── forker: human branches → work items born reviewing → merge/close ──────
 
 interface ForkState {
   apps: RegisteredApp[];
-  prs: { repo: string; number: number; branch: string; state: string }[];
+  work: { repo: string; number: number; branch: string; state: string }[];
 }
 
 export const forker = definePersona<ForkState>(
   "forker",
-  () => ({ apps: [], prs: [] }),
+  () => ({ apps: [], work: [] }),
   [
     {
       name: "createApp",
@@ -507,9 +507,12 @@ export const forker = definePersona<ForkState>(
       run: (ctx, state) => createApp(ctx, state),
     },
     {
-      name: "openPr",
+      name: "createWorkWithHead",
       weight: (s) => (s.apps.length > 0 ? 5 : 0),
       run: async (ctx, state) => {
+        // The human-branch path: push a branch, then file a work item with
+        // the change pre-attached — it must be BORN at phase `reviewing`, so
+        // human code flows through the same review machinery as crew code.
         const app = ctx.rng.pick(state.apps);
         const branch = `feat-${ctx.rng.token(6)}`;
         const sentinel = `pr-canary-${ctx.actor.username}-${ctx.rng.token(8)}`;
@@ -532,21 +535,28 @@ export const forker = definePersona<ForkState>(
         const res = await http(
           ctx.target,
           "POST",
-          `/api/v1/repos/${app.owner}/${app.app}/pulls`,
+          `/api/v1/repos/${app.owner}/${app.app}/work`,
           {
             auth: ctx.actor.auth,
-            body: { title: `sim PR ${branch}`, head: branch, base: "main" },
+            body: { title: `sim change ${branch}`, head: branch, base: "main" },
           },
         );
         const args = { app: app.app, branch };
         if (res.status === 201) {
-          const pr = (await res.json()) as { number: number };
-          state.prs.push({
+          const w = (await res.json()) as { number: number; phase: string };
+          state.work.push({
             repo: app.app,
-            number: pr.number,
+            number: w.number,
             branch,
             state: "open",
           });
+          if (w.phase !== "reviewing")
+            return {
+              ok: false,
+              status: 201,
+              args,
+              detail: `work with head born '${w.phase}', expected reviewing`,
+            };
           return { ok: true, status: 201, args };
         }
         return statusOutcome(res, args);
@@ -554,12 +564,12 @@ export const forker = definePersona<ForkState>(
     },
     {
       name: "hitPreview",
-      weight: (s) => (s.prs.some((p) => p.state === "open") ? 4 : 0),
+      weight: (s) => (s.work.some((w) => w.state === "open") ? 4 : 0),
       run: async (ctx, state) => {
-        const open = state.prs.filter((p) => p.state === "open");
-        const pr = ctx.rng.pick(open);
-        const app = state.apps.find((a) => a.app === pr.repo)!;
-        const host = `pr-${pr.number}-${app.app}-${app.owner}.${ctx.target.domain}`;
+        const open = state.work.filter((w) => w.state === "open");
+        const w = ctx.rng.pick(open);
+        const app = state.apps.find((a) => a.app === w.repo)!;
+        const host = `pr-${w.number}-${app.app}-${app.owner}.${ctx.target.domain}`;
         const res = await http(ctx.target, "GET", appUrl(ctx.target, host), {
           accept: "application/json",
         });
@@ -567,26 +577,26 @@ export const forker = definePersona<ForkState>(
         return {
           ok: true,
           status: res.status,
-          args: { host, pr: pr.number },
+          args: { host, work: w.number },
         };
       },
     },
     {
-      name: "resolvePr",
-      weight: (s) => (s.prs.some((p) => p.state === "open") ? 2 : 0),
+      name: "resolveWork",
+      weight: (s) => (s.work.some((w) => w.state === "open") ? 2 : 0),
       run: async (ctx, state) => {
-        const open = state.prs.filter((p) => p.state === "open");
-        const pr = ctx.rng.pick(open);
+        const open = state.work.filter((w) => w.state === "open");
+        const w = ctx.rng.pick(open);
         const action = ctx.rng.bool(0.6) ? "merge" : "close";
         const res = await http(
           ctx.target,
           "POST",
-          `/api/v1/repos/${ctx.actor.username}/${pr.repo}/pulls/${pr.number}/${action}`,
+          `/api/v1/repos/${ctx.actor.username}/${w.repo}/work/${w.number}/${action}`,
           { auth: ctx.actor.auth },
         );
         if (okStatus(res.status))
-          pr.state = action === "merge" ? "merged" : "closed";
-        return statusOutcome(res, { pr: pr.number, action });
+          w.state = action === "merge" ? "merged" : "closed";
+        return statusOutcome(res, { work: w.number, action });
       },
     },
   ],
@@ -640,6 +650,10 @@ export const noisyNeighbor = definePersona<Record<string, never>>(
 // public-READ by design, so a 200 on a read is NOT a breach. Every probe here
 // SHOULD be denied (403/404). A 2xx on any of them is a real cross-tenant
 // isolation breach and is flagged ok:false + breach:true with the seed.
+// Two probes attack the WORK-ITEM PHASE MACHINE itself (on the attacker's own
+// repo): an illegal phase jump must be rejected with state unchanged, and a
+// label write must never move `phase` — a violation synthesizes a 2xx so it
+// hard-fails like a breach.
 
 interface Probe {
   name: string;
@@ -704,14 +718,17 @@ const PROBES: Probe[] = [
     },
   },
   {
-    name: "openPrOnForeignRepo",
+    name: "attachChangeToForeignRepo",
     needs: "app",
     run: async (ctx, v) => {
+      // Filing work with a `head` is a write intent (it attaches a change and
+      // is born reviewing) — on B's repo it must be denied before any branch
+      // validation runs.
       const app = v.app!;
       const res = await http(
         ctx.target,
         "POST",
-        `/api/v1/repos/${app.owner}/${app.app}/pulls`,
+        `/api/v1/repos/${app.owner}/${app.app}/work`,
         {
           auth: ctx.actor.auth,
           body: { title: "sim intrusion", head: "main", base: "main" },
@@ -725,22 +742,55 @@ const PROBES: Probe[] = [
     },
   },
   {
-    name: "labelForeignIssue",
+    name: "queueForeignWork",
     needs: "app",
     run: async (ctx, v) => {
-      // File an issue on B's repo (open by design) then try to LABEL it — a
-      // write intent that must be denied even on an issue we authored.
+      // Stating intent on B's public repo is allowed; QUEUEING it (the verb
+      // that spends B's crew budget) is a write and must be denied.
       const app = v.app!;
       const mk = await http(
         ctx.target,
         "POST",
-        `/api/v1/repos/${app.owner}/${app.app}/issues`,
+        `/api/v1/repos/${app.owner}/${app.app}/work`,
         { auth: ctx.actor.auth, body: { title: "sim probe" } },
       );
       if (mk.status !== 201)
         return {
           status: mk.status,
-          args: { repo: `${app.owner}/${app.app}`, at: "create-issue" },
+          args: { repo: `${app.owner}/${app.app}`, at: "create-work" },
+          body: await mk.text(),
+        };
+      const w = (await mk.json()) as { number: number };
+      const res = await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${app.owner}/${app.app}/work/${w.number}/queue`,
+        { auth: ctx.actor.auth },
+      );
+      return {
+        status: res.status,
+        args: { repo: `${app.owner}/${app.app}`, work: w.number },
+        body: await res.text(),
+      };
+    },
+  },
+  {
+    name: "labelForeignIssue",
+    needs: "app",
+    run: async (ctx, v) => {
+      // File a work item on B's repo (open by design) then try to LABEL it —
+      // a write intent that must be denied even on an item we authored.
+      const app = v.app!;
+      const mk = await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${app.owner}/${app.app}/work`,
+        { auth: ctx.actor.auth, body: { title: "sim probe" } },
+      );
+      if (mk.status !== 201)
+        return {
+          status: mk.status,
+          args: { repo: `${app.owner}/${app.app}`, at: "create-work" },
           body: await mk.text(),
         };
       const issue = (await mk.json()) as { number: number };
@@ -755,6 +805,122 @@ const PROBES: Probe[] = [
         args: { repo: `${app.owner}/${app.app}`, issue: issue.number },
         body: await res.text(),
       };
+    },
+  },
+  {
+    name: "illegalPhaseJump",
+    needs: "none",
+    run: async (ctx) => {
+      // Build a CLOSED item on our OWN repo, then try to queue it: the phase
+      // machine must reject the jump (4xx) and the phase must not move. A 2xx
+      // — or a mutated phase after a rejection — is a state-machine breach.
+      const repo = ctx.rng.name("probe");
+      const own = ctx.actor.username;
+      const auth = ctx.actor.auth;
+      const mkRepo = await http(ctx.target, "POST", "/api/v1/repos", {
+        auth,
+        body: { name: repo },
+      });
+      if (mkRepo.status !== 201)
+        return { status: 403, args: { at: "create-repo", got: mkRepo.status } };
+      const mkWork = await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${own}/${repo}/work`,
+        { auth, body: { title: "phase probe" } },
+      );
+      if (mkWork.status !== 201)
+        return { status: 403, args: { at: "create-work", got: mkWork.status } };
+      const w = (await mkWork.json()) as { number: number };
+      await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${own}/${repo}/work/${w.number}/close`,
+        { auth },
+      );
+      const jump = await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${own}/${repo}/work/${w.number}/queue`,
+        { auth },
+      );
+      if (jump.status < 400)
+        return {
+          status: jump.status,
+          args: { repo, work: w.number },
+          body: "queue accepted on a closed work item",
+        };
+      const after = await http(
+        ctx.target,
+        "GET",
+        `/api/v1/repos/${own}/${repo}/work/${w.number}`,
+        { auth },
+      );
+      const item = (await after.json().catch(() => null)) as {
+        phase?: string;
+      } | null;
+      if (item?.phase !== "closed")
+        return {
+          status: 200,
+          args: { repo, work: w.number },
+          body: `phase moved to '${item?.phase}' after a REJECTED queue`,
+        };
+      return { status: jump.status, args: { repo, work: w.number } };
+    },
+  },
+  {
+    name: "labelWritePhaseDrift",
+    needs: "none",
+    run: async (ctx) => {
+      // Labels are taxonomy only: writing them must never move `phase`. Born
+      // queued via the agent-work verb, then labels overwritten — the phase
+      // must hold (queued, or building if a credentialed crew claimed it).
+      const repo = ctx.rng.name("probe");
+      const own = ctx.actor.username;
+      const auth = ctx.actor.auth;
+      const mkRepo = await http(ctx.target, "POST", "/api/v1/repos", {
+        auth,
+        body: { name: repo },
+      });
+      if (mkRepo.status !== 201)
+        return { status: 403, args: { at: "create-repo", got: mkRepo.status } };
+      const mkWork = await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${own}/${repo}/work`,
+        { auth, body: { title: "label probe", labels: ["agent-work"] } },
+      );
+      if (mkWork.status !== 201)
+        return { status: 403, args: { at: "create-work", got: mkWork.status } };
+      const w = (await mkWork.json()) as { number: number; phase: string };
+      if (w.phase !== "queued")
+        return {
+          status: 200,
+          args: { repo, work: w.number },
+          body: `agent-work item born '${w.phase}', expected queued`,
+        };
+      await http(
+        ctx.target,
+        "POST",
+        `/api/v1/repos/${own}/${repo}/issues/${w.number}/labels`,
+        { auth, body: { labels: ["bug"] } },
+      );
+      const after = await http(
+        ctx.target,
+        "GET",
+        `/api/v1/repos/${own}/${repo}/work/${w.number}`,
+        { auth },
+      );
+      const item = (await after.json().catch(() => null)) as {
+        phase?: string;
+      } | null;
+      if (item?.phase !== "queued" && item?.phase !== "building")
+        return {
+          status: 200,
+          args: { repo, work: w.number },
+          body: `label write moved phase to '${item?.phase}'`,
+        };
+      return { status: 403, args: { repo, work: w.number, phase: item.phase } };
     },
   },
   {

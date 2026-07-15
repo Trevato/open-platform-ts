@@ -102,7 +102,7 @@ export interface ReviewerDeps {
 }
 
 /**
- * Review a crew PR's live preview: fetch a QA session, then run the caged
+ * Review a work item's live preview: fetch a QA session, then run the caged
  * reviewer agent (bun + HTTP, no host access) which tries to break the feature
  * and emits a verdict line. Returns the parsed verdict.
  */
@@ -111,15 +111,19 @@ export async function runReviewer(
   args: {
     owner: string;
     repo: string;
-    prNumber: number;
+    /** The work-item number; the preview host keeps its inert pr- prefix. */
+    workNumber: number;
     issueBody: string;
     issueTitle: string;
+    /** Verdict lines from earlier attempts, so a re-review checks the fix
+     *  instead of re-litigating from scratch. */
+    priorVerdicts?: string[];
   },
 ): Promise<Result<Verdict, ReviewError>> {
   const fail = (step: string) => (cause: unknown) =>
     new ReviewError({ message: String(cause), step });
   const port = deps.httpsPort === 443 ? "" : `:${deps.httpsPort}`;
-  const previewHost = `pr-${args.prNumber}-${args.repo}-${args.owner}.${deps.domain}`;
+  const previewHost = `pr-${args.workNumber}-${args.repo}-${args.owner}.${deps.domain}`;
   const previewOrigin = `https://${previewHost}${port}`;
   const issuerOrigin = `https://${deps.domain}${port}`;
 
@@ -148,7 +152,14 @@ export async function runReviewer(
             `You are testing over HTTP with Bun. Trust the platform CA via OP_CA_FILE.\n` +
             (cookie
               ? `A signed-in QA session cookie is in session-cookie.txt — send it as \`Cookie: sid=<value>\`.\n`
-              : `NOTE: a QA session could not be pre-obtained; test unauthenticated behavior and report if sign-in is required to verify.\n`),
+              : `NOTE: a QA session could not be pre-obtained; test unauthenticated behavior and report if sign-in is required to verify.\n`) +
+            (args.priorVerdicts?.length
+              ? `\n## Prior attempts on this work item\n${args.priorVerdicts
+                  .map((v, i) => `- attempt ${i + 1}: ${v}`)
+                  .join(
+                    "\n",
+                  )}\nVerify the earlier blockers are actually fixed before anything else.\n`
+              : ""),
         );
         await writeFile(
           join(work, "session-cookie.txt"),

@@ -127,21 +127,21 @@ export interface BuilderDeps {
 }
 
 /**
- * Build the change described by an issue: clone → feature branch → the agent
- * edits + commits → the driver pushes + opens a PR (which auto-creates a
- * preview env with forked data). Returns the PR number.
+ * Build the change described by a work item: clone → feature branch → the
+ * agent edits + commits → the driver pushes + attaches the change (which
+ * auto-creates a preview env with forked data and hands the item to review).
  *
- * In rework mode (opts.rework), it checks out the EXISTING PR branch and hands
- * the agent the reviewer's blockers to fix — a new commit on the same branch
- * updates the open PR (no new PR), which re-triggers the preview + review.
+ * In rework mode (opts.rework), it checks out the EXISTING change branch and
+ * hands the agent the reviewer's blockers to fix — a new commit on the same
+ * branch re-triggers the preview + review. One change per item, ever.
  */
 export async function runBuilder(
   deps: BuilderDeps,
   issue: IssueRow,
   opts: {
-    rework?: { verdict: string; prNumber: number; attempt: number };
+    rework?: { verdict: string; attempt: number };
   } = {},
-): Promise<Result<{ prNumber: number; costUsd: number }, BuilderError>> {
+): Promise<Result<{ costUsd: number }, BuilderError>> {
   const fail = (step: string) => (cause: unknown) =>
     new BuilderError({ message: String(cause), step });
   const rework = opts.rework;
@@ -293,8 +293,8 @@ export async function runBuilder(
         }
 
         // Driver push (local bare path — no network credential). A fresh build
-        // opens a PR (auto-creating a preview with forked data); a rework just
-        // updates the existing PR's branch, which re-triggers preview + review.
+        // attaches the change (auto-creating a preview with forked data); a
+        // rework just updates the branch, which re-triggers preview + review.
         await git(checkout, [
           "push",
           "-q",
@@ -302,20 +302,17 @@ export async function runBuilder(
           "origin",
           `${branch}:${branch}`,
         ]);
-        if (rework)
-          return { prNumber: rework.prNumber, costUsd: run.value.costUsd };
-        const pr = await deps.forge.createPr(
+        if (rework) return { costUsd: run.value.costUsd };
+        const attached = await deps.forge.attachChange(
           deps.systemActor,
           issue.owner,
           issue.repo,
-          {
-            title: `${issue.title} (#${issue.number})`,
-            head: branch,
-          },
+          issue.number,
+          { head: branch },
         );
-        if (pr.status === "error")
-          throw new Error(`open PR: ${pr.error.message}`);
-        return { prNumber: pr.value.number, costUsd: run.value.costUsd };
+        if (attached.status === "error")
+          throw new Error(`attach change: ${attached.error.message}`);
+        return { costUsd: run.value.costUsd };
       } finally {
         await rm(work, { recursive: true, force: true });
       }

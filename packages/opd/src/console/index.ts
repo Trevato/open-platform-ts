@@ -4,6 +4,8 @@ import type { GitHost } from "@op/git";
 import { readLineage } from "@op/mitosis";
 import type { Store } from "@op/store";
 import { readAppSpecs } from "../gitops.ts";
+import { computeIntegrationMap } from "../integration.ts";
+import type { AppPolicy } from "../manifest.ts";
 import { isSelfRepo, OPD, PLAT } from "../platform-config.ts";
 import { authorizeFor } from "../oidc.ts";
 import { hostFor } from "../policy.ts";
@@ -16,6 +18,7 @@ export interface ConsoleDeps {
   git: GitHost;
   sd: StateDir;
   domain: string;
+  appPolicy: () => AppPolicy;
 }
 
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
@@ -46,30 +49,29 @@ function friendlyState(state: string): string {
   return "starting up"; // pending / queued / building
 }
 
-// The crew pipeline, rendered from an issue's labels. Filed → Building →
-// Reviewing → Merged, each pending/active/done/failed.
-function pipeline(labels: string[]): string {
-  const has = (l: string) => labels.includes(l);
+// The work-item stepper, driven from `phase` — the process truth — never from
+// labels (which are taxonomy only). Human mapping: intent/queued = "Got it",
+// building/reworking = "Building it", reviewing = "Making sure it works",
+// shipped = "Live". Parked marks the step waiting on a human; closed items
+// render no stepper (the closed pill is explicit).
+function stepper(phase: string, parkedReason: string | null): string {
   type S = "pending" | "active" | "done" | "failed";
-  let filed: S = "done";
+  let got: S = "done";
   let building: S = "pending";
-  let reviewing: S = "pending";
-  let merged: S = "pending";
-  if (has("agent-shipped")) {
-    building = reviewing = "done";
-    merged = "done";
-  } else if (has("agent-review-failed")) {
+  let review: S = "pending";
+  let live: S = "pending";
+  if (phase === "intent" || phase === "queued") got = "active";
+  else if (phase === "building" || phase === "reworking") building = "active";
+  else if (phase === "reviewing") {
     building = "done";
-    reviewing = "failed";
-  } else if (has("agent-reviewing")) {
-    building = "done";
-    reviewing = "active";
-  } else if (has("agent-building")) {
-    building = "active";
-  } else if (has("agent-failed")) {
-    building = "failed";
-  } else if (has("agent-work")) {
-    filed = "active";
+    review = "active";
+  } else if (phase === "shipped") {
+    building = review = live = "done";
+  } else if (phase === "parked") {
+    const atBuild =
+      parkedReason === "build-failed" || parkedReason === "daemon-restarted";
+    building = atBuild ? "failed" : "done";
+    if (!atBuild) review = "failed";
   }
   const step = (s: S, label: string) => {
     const dot =
@@ -82,7 +84,24 @@ function pipeline(labels: string[]): string {
             : "";
     return `<li class="step ${s}"><span class="dot ${dot}"></span>${label}</li>`;
   };
-  return `<ol class="pipeline">${step(filed, "Got it")}${step(building, "Building it")}${step(reviewing, "Making sure it works")}${step(merged, "Live")}</ol>`;
+  return `<ol class="pipeline">${step(got, "Got it")}${step(building, "Building it")}${step(review, "Making sure it works")}${step(live, "Live")}</ol>`;
+}
+
+// Phase → pill class/label, shared by the Work list and the detail page.
+function phasePillCls(phase: string): string {
+  return phase === "queued"
+    ? "open"
+    : phase === "building" || phase === "reworking"
+      ? "building"
+      : phase === "reviewing"
+        ? "reviewing"
+        : phase === "shipped"
+          ? "ok"
+          : phase === "parked"
+            ? "fail"
+            : phase === "closed"
+              ? "closed"
+              : "";
 }
 
 // Colorize a unified diff for the server-rendered PR view (no client parsing).
@@ -171,6 +190,7 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
       path === "/lineage" ||
       path === "/crew" ||
       path === "/platform" ||
+      path === "/integrations" ||
       path === "/orgs" ||
       path.startsWith("/orgs/") ||
       path.startsWith("/apps/");
@@ -286,7 +306,7 @@ async function onramp(e){
   var b=document.getElementById('onrampbtn');b.classList.add('is-loading');b.disabled=true;
   var r=await fetch('/api/v1/onramp',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({description:d})});
   var j=await r.json().catch(function(){return{}});
-  if(r.ok){toast('building your tool…');location.href='/apps/'+j.owner+'/'+j.app+'/issues/'+j.issue;}
+  if(r.ok){toast('building your tool…');location.href='/apps/'+j.owner+'/'+j.app+'/work/'+j.issue;}
   else {b.classList.remove('is-loading');b.disabled=false;toast(j.error||'failed');}
   return false;
 }
@@ -483,6 +503,91 @@ async function addMember(e){
       );
     }
 
+    // ── integrations ────────────────────────────────────────────────────
+    // The derived app graph, as two tables: what each app offers and needs,
+    // and every consume edge. Recomputed per request — nothing to go stale.
+    if (path === "/integrations") {
+      const map = await computeIntegrationMap({
+        git: deps.git,
+        store: deps.store,
+        domain: deps.domain,
+        policy: deps.appPolicy(),
+      });
+      const statePill = (state: string | null) => {
+        const s = state ?? "pending";
+        const cls =
+          s === "running"
+            ? "ok"
+            : s === "error" || s === "failed" || s === "stopped"
+              ? "fail"
+              : "building";
+        return `<span class="pill ${cls}">${esc(s)}</span>`;
+      };
+      const appLink = (owner: string, app: string) =>
+        `<a class="mono" href="/apps/${esc(owner)}/${esc(app)}">${esc(owner)}/${esc(app)}</a>`;
+      const dash = '<span class="faint">—</span>';
+      const appRows = map.apps
+        .map((a) => {
+          const provides =
+            a.provides
+              .map(
+                (p) =>
+                  `<span class="pill" data-tip="${esc(`${p.path} — ${p.description}`)}">${esc(p.name)}</span>`,
+              )
+              .join(" ") || dash;
+          const tcp =
+            a.tcp
+              .map(
+                (t) =>
+                  `<span class="mono nowrap">${esc(deps.domain)}:${t.publicPort} → :${t.containerPort}</span>`,
+              )
+              .join("<br>") || dash;
+          const manifest = a.manifestError
+            ? `<span class="err">${esc(a.manifestError)}</span>`
+            : dash;
+          return `<tr><td>${appLink(a.owner, a.app)}</td><td>${statePill(a.state)}</td><td>${provides}</td><td>${tcp}</td><td>${manifest}</td></tr>`;
+        })
+        .join("");
+      const edgeRows = map.edges
+        .map((e) => {
+          // A missing peer has no page — name it, don't link it.
+          const to = e.satisfied
+            ? appLink(e.to.owner, e.to.app)
+            : `<span class="mono">${esc(e.to.owner)}/${esc(e.to.app)}</span>`;
+          const pill = e.satisfied
+            ? '<span class="pill ok">deployed</span>'
+            : '<span class="pill fail">not deployed</span>';
+          return `<tr><td>${appLink(e.from.owner, e.from.app)}</td><td>${to}</td><td>${pill}</td></tr>`;
+        })
+        .join("");
+      const body = `
+<h1>Integrations</h1>
+<p class="sub">How your software connects — derived live from each app's <code>op.json</code> at its deployed ref. Nothing here is stored, so the map can never go stale.</p>
+<h2>Apps</h2>
+${
+  map.apps.length
+    ? `<div class="tablewrap"><table class="data">
+<thead><tr><th>App</th><th>Status</th><th>Provides</th><th>TCP</th><th>Manifest</th></tr></thead>
+<tbody>${appRows}</tbody></table></div>`
+    : `<div class="empty">No apps yet. Build one from the <a href="/">dashboard</a>.</div>`
+}
+<h2 class="mt">Connections</h2>
+${
+  map.edges.length
+    ? `<div class="tablewrap"><table class="data">
+<thead><tr><th>From</th><th>Consumes</th><th>Status</th></tr></thead>
+<tbody>${edgeRows}</tbody></table></div>`
+    : `<div class="empty">No app declares a peer yet — add <code>consumes</code> to an app's <code>op.json</code>.</div>`
+}`;
+      return page(
+        "Integrations",
+        chrome("integrations", [{ label: "Integrations" }]),
+        body,
+        "",
+        { wide: true },
+      );
+    }
+
     // ── app detail ──────────────────────────────────────────────────────
     const m = path.match(/^\/apps\/([^/]+)\/([^/]+)$/);
     if (m) {
@@ -506,6 +611,16 @@ async function addMember(e){
           : app === PLAT.name
             ? "platform config"
             : "system repo";
+      // Raw-TCP ports the platform relays for this app (op.json tcpPorts).
+      // The public address is the whole point — it's what a player pastes
+      // into their game client.
+      const connectRows = deps.store
+        .listAppPortsFor(owner, app)
+        .map(
+          (p) =>
+            `<span class="k">Connect</span><span class="v"><button class="btn ghost sm" onclick="copy('${esc(`${deps.domain}:${p.public_port}`)}')" data-tip="Copy address — paste it into the game client"><code>${esc(deps.domain)}:${p.public_port}</code> ⧉</button> <span class="mut">TCP → container :${p.container_port}</span></span>`,
+        )
+        .join("");
 
       const body = `
 <div class="row between">
@@ -522,11 +637,11 @@ ${
   ${isSelf ? "" : `<span class="k">URL</span><span class="v"><a href="${esc(appUrl)}" target="_blank" rel="noopener">${esc(appUrl)}</a></span>`}
   <span class="k">Clone</span><span class="v"><button class="btn ghost sm" onclick="copy(${JSON.stringify(cloneUrl)})" data-tip="Copy git URL">${esc(cloneUrl)} ⧉</button></span>
   ${isSelf ? "" : `<span class="k">Image</span><span class="v" id="digest">${st?.image_digest ? esc(st.image_digest.slice(0, 26)) + "…" : "—"}</span>`}
+  ${connectRows}
 </div>
 
 <div class="tabs" role="tablist">
-  <button class="tab on" data-pane="issues" role="tab">Issues <span class="mut" id="ic"></span></button>
-  <button class="tab" data-pane="prs" role="tab">Pull requests <span class="mut" id="pc"></span></button>
+  <button class="tab on" data-pane="work" role="tab">Work <span class="mut" id="wc"></span></button>
   ${
     isSelf
       ? ""
@@ -536,7 +651,7 @@ ${
 </div>
 
 <div class="row between mt filterbar" id="filterbar">
-  <input type="text" id="fq" class="grow" placeholder="Search issues…">
+  <input type="text" id="fq" class="grow" placeholder="Search work…">
   <div class="tabs sm" id="fstate">
     <button class="tab on" data-v="open" type="button">Open</button>
     <button class="tab" data-v="closed" type="button">Closed</button>
@@ -545,7 +660,7 @@ ${
   <select id="fsort" aria-label="Sort"><option value="new">Newest</option><option value="old">Oldest</option></select>
 </div>
 
-<div class="tabpane on mt-s" id="pane-issues">
+<div class="tabpane on mt-s" id="pane-work">
   ${
     canWrite
       ? `<form class="newapp" id="composer-form" onsubmit="return compose(event)">
@@ -555,11 +670,7 @@ ${
   <div id="draft"></div>`
       : ""
   }
-  <div class="rows" id="issues"><div class="mut">loading…</div></div>
-</div>
-
-<div class="tabpane mt-s" id="pane-prs">
-  <div class="rows" id="prs"><div class="mut">loading…</div></div>
+  <div class="rows" id="work"><div class="mut">loading…</div></div>
 </div>
 
 <div class="tabpane mt" id="pane-deploys">
@@ -587,15 +698,13 @@ ${
 var KEY=${JSON.stringify(`${owner}/${app}`)};
 // Every bit of view state (tab, filter, search, sort) lives in the URL, so a
 // filtered view is a shareable link and back/forward just works.
-var U=urlState({tab:enP(['issues','prs','deploys','logs'],'issues'),state:enP(['open','closed','all'],'open'),q:strP(''),sort:enP(['new','old'],'new')});
-var lastIssues=[],lastPrs=[];
+var U=urlState({tab:enP(['work','deploys','logs'],'work'),state:enP(['open','closed','all'],'open'),q:strP(''),sort:enP(['new','old'],'new')});
+var lastWork=[];
 
 function activateTab(tab){
   document.querySelectorAll('.tab[data-pane]').forEach(function(x){x.classList.toggle('on',x.dataset.pane===tab)});
   document.querySelectorAll('.tabpane').forEach(function(p){p.classList.toggle('on',p.id==='pane-'+tab)});
-  var isList=tab==='issues'||tab==='prs';
-  document.getElementById('filterbar').classList.toggle('hide',!isList);
-  document.getElementById('fq').placeholder='Search '+(tab==='prs'?'pull requests':'issues')+'…';
+  document.getElementById('filterbar').classList.toggle('hide',tab!=='work');
 }
 function syncControls(){var s=U.read();document.getElementById('fq').value=s.q;
   document.querySelectorAll('#fstate .tab').forEach(function(b){b.classList.toggle('on',b.dataset.v===s.state)});
@@ -603,22 +712,21 @@ function syncControls(){var s=U.read();document.getElementById('fq').value=s.q;
 function filt(list,text){var s=U.read();var q=s.q.toLowerCase();
   var out=list.filter(function(x){return !q||text(x).toLowerCase().indexOf(q)>=0;});
   out.sort(function(a,b){return s.sort==='old'?a.number-b.number:b.number-a.number;});return out;}
-function issueRow(it){
-  var labs=(it.labels||'').split(',').filter(Boolean).map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join('');
-  var st=it.state==='closed'?'<span class="pill closed">closed</span>':'';
-  var blk=(it.openBlockers&&it.openBlockers.length)?'<span class="pill blocked" data-tip="Crew waits until these close">blocked by '+it.openBlockers.map(function(n){return '#'+n;}).join(', ')+'</span>':'';
-  return '<a class="list-row" href="/apps/'+KEY+'/issues/'+it.number+'"><span class="num">#'+it.number+'</span><span class="ttl">'+escHtml(it.title)+'</span><span class="meta">'+blk+labs+st+'</span></a>';
+function phaseCls(p){return p==='queued'?'open':(p==='building'||p==='reworking')?'building':p==='reviewing'?'reviewing':p==='shipped'?'ok':p==='parked'?'fail':p==='closed'?'closed':'';}
+function phasePill(it){
+  var txt=it.phase==='parked'&&it.parkedReason?('parked · '+it.parkedReason):it.phase;
+  return '<span class="pill '+phaseCls(it.phase)+'">'+escHtml(txt)+'</span>';
 }
-function prRow(pr){var s=pr.state||'open';
-  return '<a class="list-row" href="/apps/'+KEY+'/pulls/'+pr.number+'"><span class="num">#'+pr.number+'</span><span class="ttl">'+escHtml(pr.title)+'</span><span class="meta"><span class="pill '+s+'">'+s+'</span></span></a>';
+function workRow(it){
+  var labs=(it.labels||[]).map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join('');
+  var blk=(it.blockedBy&&it.blockedBy.length)?'<span class="pill blocked" data-tip="Crew waits until these ship">blocked by '+it.blockedBy.map(function(b){return escHtml((b.repo===it.repo?'':b.repo)+'#'+b.number);}).join(', ')+'</span>':'';
+  var chg=it.change?'<span class="pill '+(it.change.state==='open'?'open':escHtml(it.change.state||''))+'" data-tip="change on branch '+escHtml(it.change.head)+'">⎇ '+escHtml(it.change.head)+'</span>':'';
+  return '<a class="list-row" href="/apps/'+KEY+'/work/'+it.number+'"><span class="num">#'+it.number+'</span><span class="ttl">'+escHtml(it.title)+'</span><span class="meta">'+blk+labs+chg+phasePill(it)+'</span></a>';
 }
 function renderLists(){
-  var iss=filt(lastIssues,function(x){return x.title+' '+(x.labels||'')});
-  document.getElementById('ic').textContent=iss.length||'';
-  document.getElementById('issues').innerHTML=iss.length?iss.map(issueRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">'+(lastIssues.length?'No issues match your filter.':'No issues. Describe a feature above.')+'</div>';
-  var prs=filt(lastPrs,function(x){return x.title});
-  document.getElementById('pc').textContent=prs.length||'';
-  document.getElementById('prs').innerHTML=prs.length?prs.map(prRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">'+(lastPrs.length?'No pull requests match.':'No pull requests.')+'</div>';
+  var items=filt(lastWork,function(x){return x.title+' '+(x.labels||[]).join(' ')});
+  document.getElementById('wc').textContent=items.length||'';
+  document.getElementById('work').innerHTML=items.length?items.map(workRow).join(''):'<div class="mut" style="font-size:13px;padding:8px 0">'+(lastWork.length?'No work matches your filter.':'No work yet. Describe a change above.')+'</div>';
 }
 // A deploy = one sha's phase sequence. Grouping answers "did this finish?" —
 // each deploy shows the phase it actually reached (queued→…→running/failed).
@@ -649,10 +757,8 @@ async function tick(){
     var r=await fetch('/api/v1/apps/'+KEY);
     if(r.ok){var a=await r.json();document.getElementById('dot').className='dot '+a.state;document.getElementById('state').textContent=a.state;
       var dg=document.getElementById('digest');if(dg&&a.imageDigest)dg.textContent=a.imageDigest.slice(0,26)+'…';}
-    var il=await fetch('/api/v1/repos/'+KEY+'/issues'+stateParam());
-    if(il.ok){lastIssues=(await il.json()).issues||[];}
-    var pl=await fetch('/api/v1/repos/'+KEY+'/pulls'+stateParam());
-    if(pl.ok){lastPrs=(await pl.json()).pulls||[];}
+    var wl=await fetch('/api/v1/repos/'+KEY+'/work'+stateParam());
+    if(wl.ok){lastWork=(await wl.json()).work||[];}
     renderLists();
     var ev=await fetch('/api/v1/apps/'+KEY+'/events');
     if(ev.ok){document.getElementById('deploys').innerHTML=renderDeploys((await ev.json()).events||[]);}
@@ -671,12 +777,6 @@ document.querySelectorAll('#fstate .tab').forEach(function(b){b.onclick=function
 document.getElementById('fsort').onchange=function(){U.set({sort:this.value});renderLists();};
 U.onpop(function(){var s=U.read();activateTab(s.tab);syncControls();tick();});
 activateTab(U.read().tab);syncControls();
-async function snap(b){b.classList.add('is-loading');b.disabled=true;
-  var r=await fetch('/api/v1/apps/'+KEY+'/snapshots',{method:'POST'});
-  var j=await r.json().catch(function(){return{}});
-  b.classList.remove('is-loading');b.disabled=false;
-  toast(r.ok?('snapshot '+j.id):(j.error||'snapshot failed'));
-}
 async function snap(b){b.classList.add('is-loading');b.disabled=true;
   var r=await fetch('/api/v1/apps/'+KEY+'/snapshots',{method:'POST'});
   var j=await r.json().catch(function(){return{}});
@@ -746,9 +846,9 @@ async function fileDraft(b){
   b.classList.add('is-loading');b.disabled=true;await fileIssue(title,body,labels);
 }
 async function fileIssue(title,body,labels){
-  var r=await fetch('/api/v1/repos/'+KEY+'/issues',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:title,body:body,labels:labels})});
+  var r=await fetch('/api/v1/repos/'+KEY+'/work',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({title:title,body:body,labels:labels})});
   var j=await r.json().catch(function(){return{}});
-  if(r.ok){document.getElementById('draft').innerHTML='';var cf=document.getElementById('composer-form');cf.classList.remove('hide');document.getElementById('idea').value='';toast(labels.indexOf('agent-work')>=0?'filed — crew is on it':'issue filed');tick();}
+  if(r.ok){document.getElementById('draft').innerHTML='';var cf=document.getElementById('composer-form');cf.classList.remove('hide');document.getElementById('idea').value='';toast(labels.indexOf('agent-work')>=0?'filed — crew is on it':'work filed');tick();}
   else toast(j.error||'failed');
 }
 function rewrite(){document.getElementById('draft').innerHTML='';document.getElementById('composer-form').classList.remove('hide');var i=document.getElementById('idea');i.value=window._idea||'';i.focus();}
@@ -756,7 +856,14 @@ tick();setInterval(tick,1800);`,
       );
     }
 
-    // ── pull request detail ─────────────────────────────────────────────
+    // ── legacy detail routes → the one work surface ─────────────────────
+    // Issues ARE work items (identity — same numbers): straight redirect.
+    const ir = path.match(/^\/apps\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
+    if (ir) return redirect(`/apps/${ir[1]!}/${ir[2]!}/work/${ir[3]!}`);
+
+    // Historic PR pages resolve via the FROZEN pull_requests table to their
+    // linked work item (branch convention agent/issue-N); anything else gets
+    // a tombstone — no new PR numbers are ever minted.
     const pm = path.match(/^\/apps\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
     if (pm) {
       const [, owner, app, num] = pm as unknown as [
@@ -766,104 +873,133 @@ tick();setInterval(tick,1800);`,
         string,
       ];
       const pr = deps.store.getPr(owner, app, Number(num));
+      const linked = pr?.head_ref.match(/^agent\/issue-(\d+)$/);
+      if (linked) return redirect(`/apps/${owner}/${app}/work/${linked[1]!}`);
       const back: Crumb[] = [
         { label: "Apps", href: "/" },
         { label: app, href: `/apps/${owner}/${app}` },
-        { label: `#${num}` },
+        { label: `PR #${num}` },
       ];
-      if (!pr)
-        return page(
-          "Not found",
-          chrome("apps", back),
-          notFound(`/apps/${esc(owner)}/${esc(app)}`),
-        );
-      const diff = await deps.git.diffStat(
-        owner,
-        app,
-        pr.base_ref,
-        pr.head_ref,
-      );
-      const patch = diff.status === "ok" ? diff.value.patch : "";
-      const canWrite = deps.forge.authorize(user, owner, app, "write");
-      const isOpen = pr.state === "open";
-      const previewHost = `pr-${pr.number}-${app}-${owner}.${deps.domain}${url.port ? `:${url.port}` : ""}`;
-      const steps =
-        pr.state === "merged"
-          ? ["agent-shipped"]
-          : isOpen
-            ? ["agent-reviewing"]
-            : ["agent-review-failed"];
-      const body = `
-${pipeline(steps)}
-<div class="row between">
-  <h1 class="m0">#${pr.number} <span style="font-weight:560">${esc(pr.title)}</span></h1>
-  <span class="pill ${esc(pr.state)}">${esc(pr.state)}</span>
-</div>
-<p class="sub"><span class="mono">${esc(pr.head_ref)} → ${esc(pr.base_ref)}</span> · by ${esc(pr.author)}</p>
-
-<div class="card idcard">
-  <span class="k">Preview</span><span class="v">${isOpen ? `<a href="https://${esc(previewHost)}/" target="_blank" rel="noopener">https://${esc(previewHost)}/</a>` : "—"}</span>
-  <span class="k">Data</span><span class="v mut">copy-on-write clone of prod, isolated to this PR</span>
-</div>
-
-${canWrite && isOpen ? `<div class="row mb"><button class="btn" onclick="act('merge',this)">Merge</button><button class="btn ghost" onclick="act('close',this)">Close</button></div>` : ""}
-<div class="label mb">Diff <span class="mut">${diff.status === "ok" ? esc(String(diff.value.files ?? "")) : ""}</span></div>
-<pre class="logs">${patch ? colorDiff(patch) : "(no changes)"}</pre>`;
       return page(
-        `#${pr.number}`,
+        `PR #${num}`,
         chrome("apps", back),
-        body,
-        `
-async function act(a,b){b.classList.add('is-loading');b.disabled=true;
-  var r=await fetch('/api/v1/repos/${esc(owner)}/${esc(app)}/pulls/${pr.number}/'+a,{method:'POST'});
-  var j=await r.json().catch(function(){return{}});
-  if(r.ok){toast(a==='merge'?'merged — shipping':'closed');setTimeout(function(){location.href='/apps/${esc(owner)}/${esc(app)}'},700);}
-  else {b.classList.remove('is-loading');b.disabled=false;toast(j.error||'failed');}
-}`,
+        `<h1>Pull requests became work items</h1>
+<p class="sub">${
+          pr
+            ? `Historic PR #${esc(num)} (<span class="mono">${esc(pr.head_ref)}</span>, ${esc(pr.state)}) predates the unified work surface and has no linked work item.`
+            : `There is no PR #${esc(num)} here — changes now live on the app's Work tab.`
+        }</p>
+<p class="sub"><a href="/apps/${esc(owner)}/${esc(app)}">← back to ${esc(app)}</a></p>`,
       );
     }
 
-    // ── issue detail ─────────────────────────────────────────────────────
-    const im = path.match(/^\/apps\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
-    if (im) {
-      const [, owner, app, num] = im as unknown as [
+    // ── work detail — intent + change + attempts + activity, one page ────
+    const wm = path.match(/^\/apps\/([^/]+)\/([^/]+)\/work\/(\d+)$/);
+    if (wm) {
+      const [, owner, app, num] = wm as unknown as [
         string,
         string,
         string,
         string,
       ];
-      const issue = deps.store.getIssue(owner, app, Number(num));
+      const n = Number(num);
+      const item = deps.store.getIssue(owner, app, n);
       const back: Crumb[] = [
         { label: "Apps", href: "/" },
         { label: app, href: `/apps/${owner}/${app}` },
         { label: `#${num}` },
       ];
-      if (!issue)
+      if (!item)
         return page(
           "Not found",
           chrome("apps", back),
           notFound(`/apps/${esc(owner)}/${esc(app)}`),
         );
       const canWrite = deps.forge.authorize(user, owner, app, "write");
-      const labels = issue.labels.split(",").filter(Boolean);
-      const isAgentWork = labels.some((l) => l.startsWith("agent-"));
+      const labels = item.labels.split(",").filter(Boolean);
+      const attempts = deps.store.listAttempts(owner, app, n);
+      const changeOpen = item.change_state === "open";
+      const previewHost = `pr-${item.number}-${app}-${owner}.${deps.domain}${url.port ? `:${url.port}` : ""}`;
+      const diff =
+        item.head_ref && item.base_ref
+          ? await deps.git.diffStat(owner, app, item.base_ref, item.head_ref)
+          : null;
+      const patch = diff?.status === "ok" ? diff.value.patch : "";
+      const nFiles = diff?.status === "ok" ? diff.value.files.length : 0;
+      const phaseText =
+        item.phase === "parked" && item.parked_reason
+          ? `parked · ${item.parked_reason}`
+          : item.phase;
+
+      // Controls follow the legal edges: Queue (intent), Re-queue (parked),
+      // Merge (open change in reviewing — the human rescue, mandatory for
+      // self-repos which always park — or parked), Close (any non-terminal).
+      const controls = canWrite
+        ? [
+            item.phase === "intent"
+              ? `<button class="btn" onclick="act('queue',this,'queued — the crew is on it')">Send to crew</button>`
+              : "",
+            item.phase === "parked"
+              ? `<button class="btn secondary" onclick="act('queue',this,'re-queued')">Re-queue</button>`
+              : "",
+            changeOpen &&
+            (item.phase === "reviewing" || item.phase === "parked")
+              ? `<button class="btn" onclick="act('merge',this,'merged — shipping')">Merge</button>`
+              : "",
+            item.state === "open"
+              ? `<button class="btn ghost" onclick="act('close',this,'closed')">Close</button>`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("")
+        : "";
+
+      const attemptRows = attempts
+        .map((a) => {
+          const cost = [
+            a.builder_cost_usd != null
+              ? `build $${a.builder_cost_usd.toFixed(2)}`
+              : "",
+            a.reviewer_cost_usd != null
+              ? `review $${a.reviewer_cost_usd.toFixed(2)}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          const vCls =
+            a.verdict === "pass" || a.verdict === "concerns"
+              ? "ok"
+              : a.verdict === null
+                ? "building"
+                : "fail";
+          return `<div class="list-row"><span class="num">#${a.attempt}</span><span class="ttl">${esc(a.verdict_line ?? a.verdict ?? "in progress")}</span><span class="meta">${cost ? `<span class="mut" style="font-size:12px">${esc(cost)}</span>` : ""}<span class="pill ${vCls}">${esc(a.verdict ?? "building")}</span></span></div>`;
+        })
+        .join("");
+
+      const changeCard = item.head_ref
+        ? `<div class="card idcard">
+  <span class="k">Change</span><span class="v"><span class="mono">${esc(item.head_ref)} → ${esc(item.base_ref ?? "main")}</span> <span class="pill ${esc(item.change_state ?? "")}">${esc(item.change_state ?? "")}</span></span>
+  ${
+    changeOpen
+      ? `<span class="k">Preview</span><span class="v"><a href="https://${esc(previewHost)}/" target="_blank" rel="noopener">https://${esc(previewHost)}/</a></span>
+  <span class="k">Data</span><span class="v mut">copy-on-write clone of prod, isolated to this change</span>`
+      : ""
+  }
+</div>`
+        : "";
+
       const body = `
-<div id="pipeline-wrap">${isAgentWork ? pipeline(labels) : ""}</div>
+<div id="stepper-wrap">${item.phase === "closed" ? "" : stepper(item.phase, item.parked_reason)}</div>
 <div class="row between">
-  <h1 class="m0">#${issue.number} <span style="font-weight:560">${esc(issue.title)}</span></h1>
-  <span class="pill ${issue.state === "open" ? "open" : "closed"}" id="statepill">${esc(issue.state)}</span>
+  <h1 class="m0">#${item.number} <span style="font-weight:560">${esc(item.title)}</span></h1>
+  <span class="pill ${phasePillCls(item.phase)}" id="phasepill">${esc(phaseText)}</span>
 </div>
-<p class="sub">by ${esc(issue.author)} · <span id="labelpills">${labels.map((l) => `<span class="pill${l.startsWith("agent") ? " agent" : ""}">${esc(l)}</span>`).join(" ")}</span></p>
-${issue.body ? `<div class="card pad prewrap" style="font-size:13.5px">${esc(issue.body)}</div>` : ""}
-
-${
-  canWrite
-    ? `<div class="row mb mt">
-${isAgentWork ? "" : `<button class="btn" onclick="assign(this)">Assign to build crew</button>`}
-<button class="btn ghost" onclick="closeIssue(this)">Close issue</button></div>`
-    : ""
-}
-
+<p class="sub">by ${esc(item.author)} · <span id="labelpills">${labels.map((l) => `<span class="pill${l.startsWith("agent") ? " agent" : ""}">${esc(l)}</span>`).join(" ")}</span></p>
+${item.body ? `<div class="card pad prewrap" style="font-size:13.5px">${esc(item.body)}</div>` : ""}
+${changeCard}
+${controls ? `<div class="row mb mt">${controls}</div>` : ""}
+${attempts.length ? `<div class="mt label mb">Attempts</div><div class="rows">${attemptRows}</div>` : ""}
+${item.head_ref ? `<div class="label mb mt">Diff <span class="mut">${nFiles ? `${nFiles} file${nFiles === 1 ? "" : "s"}` : ""}</span></div><pre class="logs">${patch ? colorDiff(patch) : "(no changes)"}</pre>` : ""}
 <div class="mt row between mb"><span class="label">Activity</span><span class="mut" style="font-size:12px" id="cmts"></span></div>
 <div class="feed" id="feed" aria-live="polite"><div class="mut" style="font-size:13px">loading…</div></div>
 ${
@@ -874,23 +1010,23 @@ ${
     : ""
 }`;
       return page(
-        `#${issue.number}`,
+        `#${item.number}`,
         chrome("apps", back),
         body,
         `
-var R=${JSON.stringify(`${owner}/${app}`)};var N=${issue.number};var seen={};var firstRender=true;
+var R=${JSON.stringify(`${owner}/${app}`)};var N=${item.number};var seen={};var firstRender=true;
 var TOOLS={Read:1,Write:1,Edit:1,Bash:1,Glob:1,Grep:1,Task:1,WebFetch:1,MultiEdit:1};
 function mdLite(s){
   var e=escHtml(s);
   e=e.replace(/\`([^\`]+)\`/g,'<code>$1</code>');
-  e=e.replace(/#(\\d+)/g,'<a href="/apps/'+R+'/pulls/$1">#$1</a>');
+  e=e.replace(/#(\\d+)/g,'<a href="/apps/'+R+'/work/$1">#$1</a>');
   return e;
 }
 function classify(c){
   var b=(c.body||'').trim();
   if(c.author!=='crew') return {kind:'human',body:b,author:c.author};
   if(/^(✅|⚠️|❌)/.test(b)){var k=b.indexOf('✅')===0?'pass':b.indexOf('⚠️')===0?'warn':'fail';return {kind:'verdict',v:k,body:b};}
-  if(/^(🏗️|🔍|🚀|🌱)/.test(b)) return {kind:'phase',body:b};
+  if(/^(🏗️|🔍|🚀|🌱|🔁|🔧|🛠️)/.test(b)) return {kind:'phase',body:b};
   if(/^… /.test(b)){var rest=b.slice(2).trim();var w=rest.split(/\\s+/)[0];
     if(TOOLS[w]) return {kind:'tool',tool:w,rest:rest.slice(w.length).trim()};
     return {kind:'prose',body:rest};}
@@ -904,8 +1040,25 @@ function render(c){
   if(m.kind==='human') return '<div class="feed-block feed-human card pad"><b>@'+escHtml(m.author)+'</b> <span class="feed-t">'+t+'</span><div class="prose mt-s">'+mdLite(m.body)+'</div></div>';
   return '<div class="feed-block"><div class="feed-body prose">'+mdLite(m.body)+'</div></div>';
 }
+// Client mirror of the server stepper() — ONE phase-driven mapping, so the
+// tracker advances live without a reload.
+function renderStepper(phase,parkedReason){
+  var got='done',building='pending',review='pending',live='pending';
+  if(phase==='intent'||phase==='queued')got='active';
+  else if(phase==='building'||phase==='reworking')building='active';
+  else if(phase==='reviewing'){building='done';review='active';}
+  else if(phase==='shipped'){building=review=live='done';}
+  else if(phase==='parked'){
+    var atBuild=parkedReason==='build-failed'||parkedReason==='daemon-restarted';
+    building=atBuild?'failed':'done';
+    if(!atBuild)review='failed';
+  }
+  function step(s,label){var dot=s==='active'?'building':(s==='failed'?'error':(s==='done'?'running':''));return '<li class="step '+s+'"><span class="dot '+dot+'"></span>'+label+'</li>';}
+  return phase==='closed'?'':'<ol class="pipeline">'+step(got,'Got it')+step(building,'Building it')+step(review,'Making sure it works')+step(live,'Live')+'</ol>';
+}
+function phaseCls(p){return p==='queued'?'open':(p==='building'||p==='reworking')?'building':p==='reviewing'?'reviewing':p==='shipped'?'ok':p==='parked'?'fail':p==='closed'?'closed':'';}
 async function refresh(){
-  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N); if(!r.ok) return;
+  var r=await fetch('/api/v1/repos/'+R+'/work/'+N); if(!r.ok) return;
   var d=await r.json(); var el=document.getElementById('feed');
   var cs=d.comments||[];
   document.getElementById('cmts').textContent=cs.length?cs.length+' update'+(cs.length>1?'s':''):'';
@@ -913,41 +1066,29 @@ async function refresh(){
     var f=el;f.scrollTop=f.scrollHeight;return;}
   var fresh=cs.filter(function(c){return !seen[c.id]});
   if(fresh.length){if(el.querySelector('.mut'))el.innerHTML='';fresh.forEach(function(c){seen[c.id]=1;el.insertAdjacentHTML('beforeend',render(c));});}
-  // reflect pipeline/label/state changes LIVE, without a reload
-  if(d.labels!==undefined && d.labels!==window._lbl){
-    window._lbl=d.labels;
-    var labs=(d.labels||'').split(',').filter(Boolean);
-    var pw=document.getElementById('pipeline-wrap');
-    if(pw && labs.some(function(l){return l.indexOf('agent-')===0;})) pw.innerHTML=renderPipeline(labs);
-    var lp=document.getElementById('labelpills');
-    if(lp) lp.innerHTML=labs.map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join(' ');
+  // reflect phase/label changes LIVE, without a reload
+  if(d.phase!==undefined && d.phase!==window._phase){
+    window._phase=d.phase;
+    var sw=document.getElementById('stepper-wrap');
+    if(sw) sw.innerHTML=renderStepper(d.phase,d.parkedReason||null);
+    var pp=document.getElementById('phasepill');
+    if(pp){pp.className='pill '+phaseCls(d.phase);pp.textContent=d.phase==='parked'&&d.parkedReason?('parked · '+d.parkedReason):d.phase;}
   }
-  if(d.state!==undefined){var sp=document.getElementById('statepill');if(sp && sp.textContent!==d.state){sp.textContent=d.state;sp.className='pill '+(d.state==='open'?'open':'closed');}}
+  if(d.labels!==undefined){
+    var lbl=(d.labels||[]).join(',');
+    if(lbl!==window._lbl){window._lbl=lbl;
+      var lp=document.getElementById('labelpills');
+      if(lp) lp.innerHTML=(d.labels||[]).map(function(l){return '<span class="pill'+(l.indexOf('agent')===0?' agent':'')+'">'+escHtml(l)+'</span>';}).join(' ');}
+  }
 }
-// Client mirror of the server pipeline() so the tracker advances live.
-function renderPipeline(labs){
-  function has(l){return labs.indexOf(l)>=0;}
-  var filed='done',building='pending',reviewing='pending',merged='pending';
-  if(has('agent-shipped')){building=reviewing='done';merged='done';}
-  else if(has('agent-review-failed')){building='done';reviewing='failed';}
-  else if(has('agent-reviewing')){building='done';reviewing='active';}
-  else if(has('agent-reworking')){building='active';reviewing='pending';}
-  else if(has('agent-building')){building='active';}
-  else if(has('agent-failed')){building='failed';}
-  else if(has('agent-work')){filed='active';}
-  function step(s,label){var dot=s==='active'?'building':(s==='failed'?'error':(s==='done'?'running':''));return '<li class="step '+s+'"><span class="dot '+dot+'"></span>'+label+'</li>';}
-  return '<ol class="pipeline">'+step(filed,'Got it')+step(building,'Building it')+step(reviewing,'Making sure it works')+step(merged,'Live')+'</ol>';
-}
-async function assign(b){b.classList.add('is-loading');b.disabled=true;
-  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/labels',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({labels:['agent-work']})});
-  if(r.ok){toast('assigned — the crew is on it');setTimeout(function(){location.reload()},700);}else{b.classList.remove('is-loading');b.disabled=false;toast('failed');}
-}
-async function closeIssue(b){b.classList.add('is-loading');b.disabled=true;
-  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/close',{method:'POST'});
-  if(r.ok){toast('closed');setTimeout(function(){location.href='/apps/'+R},600);}else{b.classList.remove('is-loading');b.disabled=false;toast('failed');}
+async function act(a,b,msg){b.classList.add('is-loading');b.disabled=true;
+  var r=await fetch('/api/v1/repos/'+R+'/work/'+N+'/'+a,{method:'POST'});
+  var j=await r.json().catch(function(){return{}});
+  if(r.ok){toast(msg);setTimeout(function(){a==='close'?location.href='/apps/'+R:location.reload()},700);}
+  else {b.classList.remove('is-loading');b.disabled=false;toast(j.error||'failed');}
 }
 async function addComment(e){e.preventDefault();var i=document.getElementById('cbody');var b=i.value.trim();if(!b)return false;
-  var r=await fetch('/api/v1/repos/'+R+'/issues/'+N+'/comments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({body:b})});
+  var r=await fetch('/api/v1/repos/'+R+'/work/'+N+'/comments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({body:b})});
   if(r.ok){i.value='';refresh();}else toast('failed');return false;}
 refresh();setInterval(refresh,2000);`,
       );
@@ -965,13 +1106,14 @@ refresh();setInterval(refresh,2000);`,
         body,
         `
 function crewRow(it){
-  var blocked=it.phase==='needs review'||it.phase==='failed';
+  var blocked=it.phase==='parked';
   var pc=blocked?'fail':(it.phase==='reviewing'?'reviewing':it.phase==='queued'?'':'building');
   var dot=blocked?'error':(it.phase==='queued'?'pending':'building');
-  return '<a class="list-row" href="/apps/'+it.owner+'/'+it.repo+'/issues/'+it.number+'">'+
+  var label=blocked&&it.parkedReason?('parked · '+it.parkedReason):it.phase;
+  return '<a class="list-row" href="/apps/'+it.owner+'/'+it.repo+'/work/'+it.number+'">'+
     '<span class="num"><span class="dot '+dot+'" style="margin-right:7px"></span>'+escHtml(it.owner+'/'+it.repo+' #'+it.number)+'</span>'+
     '<span class="ttl">'+escHtml(it.title)+'</span>'+
-    '<span class="meta"><span class="pill '+pc+'">'+escHtml(it.phase)+'</span></span></a>';
+    '<span class="meta"><span class="pill '+pc+'">'+escHtml(label)+'</span></span></a>';
 }
 async function tick(){
   if(document.hidden) return;
@@ -979,7 +1121,7 @@ async function tick(){
     var r=await fetch('/api/v1/crew'); if(!r.ok) return;
     var d=await r.json(); var el=document.getElementById('queue');
     if(!d.items.length){el.innerHTML='<div class="empty">The crew is idle — nothing in flight.<br><span class="mut" style="font-size:13px">Open an app and describe a feature to put it to work.</span></div>';return;}
-    var head='<p class="sub" style="margin:-8px 0 16px">'+(d.blocked?('<b style="color:var(--red)">'+d.blocked+' need'+(d.blocked>1?'':'s')+' review</b> · '):'')+(d.working||'0')+' in progress</p>';
+    var head='<p class="sub" style="margin:-8px 0 16px">'+(d.blocked?('<b style="color:var(--red)">'+d.blocked+' parked — need'+(d.blocked>1?'':'s')+' you</b> · '):'')+(d.working||'0')+' in progress</p>';
     el.innerHTML=head+'<div class="rows">'+d.items.map(crewRow).join('')+'</div>';
   }catch(_){}
 }
@@ -1026,11 +1168,11 @@ ${sourceCard}
         `
 async function issueCount(repo,el){
   try{
-    var r=await fetch('/api/v1/repos/'+repo+'/issues?state=open');
+    var r=await fetch('/api/v1/repos/'+repo+'/work?state=open');
     if(!r.ok) return;
     var d=await r.json();
     var n=document.getElementById(el);
-    if(n) n.textContent='('+d.issues.length+' open)';
+    if(n) n.textContent='('+d.work.length+' open)';
   }catch(_){}
 }
 ${opdHosted ? "issueCount('plat/opd','ic-opd');" : ""}

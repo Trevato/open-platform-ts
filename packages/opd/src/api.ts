@@ -4,7 +4,7 @@ import { listSnapshots, snapshot } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
-import type { Store } from "@op/store";
+import type { IssueRow, Store, WorkPhase } from "@op/store";
 import { appSpecPath, commitFiles, readAppSpecs, TEMPLATE } from "./gitops.ts";
 import { computeIntegrationMap } from "./integration.ts";
 import type { AppPolicy } from "./manifest.ts";
@@ -12,6 +12,27 @@ import { hostFor, type AppSpec } from "./policy.ts";
 import type { Reconciler } from "./reconcile.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+
+// The work-item phase vocabulary (mirrors the store's legal-edge table) and
+// the non-terminal subset the platform-wide queue reports by default.
+const WORK_PHASES: ReadonlySet<string> = new Set([
+  "intent",
+  "queued",
+  "building",
+  "reviewing",
+  "reworking",
+  "shipped",
+  "parked",
+  "closed",
+]);
+const ACTIVE_PHASES: readonly WorkPhase[] = [
+  "intent",
+  "queued",
+  "building",
+  "reviewing",
+  "reworking",
+  "parked",
+];
 
 // Derive a short, valid app name from a plain-English workflow description, so
 // a non-technical user never has to "name an app". Takes the first couple of
@@ -289,7 +310,8 @@ export function apiRouter(
       const firstLine = description.split(/[.\n]/)[0]!.trim();
       const title =
         firstLine.length > 4 ? firstLine.slice(0, 72) : "Build my tool";
-      const issue = deps.forge.createIssue(user, owner, name, {
+      // agent-work is the enqueue verb: the item is born at phase `queued`.
+      const issue = await deps.forge.createWork(user, owner, name, {
         title,
         body: description,
         labels: ["agent-work"],
@@ -367,10 +389,11 @@ export function apiRouter(
       if (committed.status === "error")
         return json({ error: committed.error.message }, 500);
 
-      // File the conversion work as an agent-import issue. The dispatcher maps
-      // that label to the importer crew role; the normal preview→review→merge
-      // pipeline ships the tuned app.
-      const issue = deps.forge.createIssue(user, owner, name, {
+      // File the conversion work as an agent-import work item, born queued
+      // (agent-work is the enqueue verb). The dispatcher maps agent-import to
+      // the importer crew role; the normal preview→review→merge pipeline
+      // ships the tuned app.
+      const issue = await deps.forge.createWork(user, owner, name, {
         title: `Tune imported app to platform conventions`,
         body: [
           `This repo was imported from ${gitUrl}.`,
@@ -451,11 +474,54 @@ export function apiRouter(
       return json({ ok: true }, 201);
     }
 
-    // ── pull requests ────────────────────────────────────────────────────
-    // POST /api/v1/repos/:o/:n/pulls {title, head, base?}
-    let pm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls$/);
-    if (pm) {
-      const [, owner, repo] = pm as unknown as [string, string, string];
+    // ── work items ──────────────────────────────────────────────────────
+    // One noun: work. A work item = intent + at most one live change + an
+    // append-only attempts ledger; `phase` is the process truth. This family
+    // replaces the parallel /issues + /pulls write families (kept below as
+    // thin reads for one release).
+    const port = url.port ? `:${url.port}` : "";
+    const blockersOf = (owner: string, repo: string, number: number) =>
+      deps.store.openWorkBlockers(owner, repo, number).map((b) => ({
+        owner: b.on_owner,
+        repo: b.on_repo,
+        number: b.on_number,
+        phase: b.phase,
+      }));
+    const workJson = (row: IssueRow) => ({
+      number: row.number,
+      owner: row.owner,
+      repo: row.repo,
+      title: row.title,
+      body: row.body,
+      author: row.author,
+      state: row.state,
+      labels: row.labels.split(",").filter(Boolean),
+      phase: row.phase,
+      parkedReason: row.parked_reason,
+      createdAt: row.created_at,
+      change: row.head_ref
+        ? {
+            head: row.head_ref,
+            base: row.base_ref,
+            state: row.change_state,
+            preview:
+              row.change_state === "open"
+                ? `https://pr-${row.number}-${row.repo}-${row.owner}.${deps.domain}${port}/`
+                : null,
+          }
+        : null,
+      blockedBy: blockersOf(row.owner, row.repo, row.number),
+    });
+    const fail = (e: { message: string; code: string }) =>
+      json(
+        { error: e.message },
+        e.code === "unauthorized" ? 403 : e.code === "not_found" ? 404 : 400,
+      );
+
+    // POST/GET /api/v1/repos/:o/:r/work — file work, list work.
+    let wm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/work$/);
+    if (wm) {
+      const [, owner, repo] = wm as unknown as [string, string, string];
       if (!isValidName(owner) || !isValidName(repo))
         return json({ error: "invalid" }, 400);
       if (req.method === "GET") {
@@ -463,34 +529,218 @@ export function apiRouter(
         if (!user || !deps.forge.authorize(user, owner, repo, "read"))
           return json({ error: "unauthorized" }, user ? 403 : 401);
         const state = url.searchParams.get("state") ?? undefined;
-        return json({ pulls: deps.store.listPrs(owner, repo, state) });
+        const phase = url.searchParams.get("phase");
+        if (phase && !WORK_PHASES.has(phase))
+          return json({ error: `unknown phase '${phase}'` }, 400);
+        const items = deps.store
+          .listIssues(owner, repo, state)
+          .filter((i) => !phase || i.phase === phase);
+        return json({ work: items.map(workJson) });
       }
       if (req.method === "POST") {
         const user = await deps.forge.authenticate(req);
         if (!user) return json({ error: "unauthorized" }, 401);
         const body = (await req.json().catch(() => null)) as {
           title?: string;
+          body?: string;
+          labels?: string[];
           head?: string;
           base?: string;
         } | null;
-        if (!body?.head) return json({ error: "head branch required" }, 400);
-        const pr = await deps.forge.createPr(user, owner, repo, {
-          title: body.title ?? "",
-          head: body.head,
+        if (!body?.title) return json({ error: "title required" }, 400);
+        const created = await deps.forge.createWork(user, owner, repo, {
+          title: body.title,
+          ...(body.body ? { body: body.body } : {}),
+          ...(body.labels ? { labels: body.labels } : {}),
+          ...(body.head ? { head: body.head } : {}),
           ...(body.base ? { base: body.base } : {}),
         });
-        if (pr.status === "error")
-          return json(
-            { error: pr.error.message },
-            pr.error.code === "unauthorized" ? 403 : 400,
-          );
-        // Kick so a preview environment comes up for the new PR.
-        void deps.reconciler.kickAll();
-        return json(pr.value, 201);
+        if (created.status === "error") return fail(created.error);
+        // Born reviewing (a change came attached) → build its preview; born
+        // queued (the agent-work verb) → wake the crew.
+        if (created.value.phase === "reviewing") void deps.reconciler.kickAll();
+        if (created.value.phase === "queued") deps.kickCrew();
+        return json(workJson(created.value), 201);
       }
     }
 
-    // GET /api/v1/repos/:o/:n/pulls/:num  (+ diff)
+    // GET /api/v1/work?phase= — the platform-wide queue (dashboard/heartbeat).
+    if (req.method === "GET" && path === "/api/v1/work") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const phase = url.searchParams.get("phase");
+      if (phase && !WORK_PHASES.has(phase))
+        return json({ error: `unknown phase '${phase}'` }, 400);
+      const phases = phase ? [phase as WorkPhase] : ACTIVE_PHASES;
+      return json({
+        work: phases
+          .flatMap((p) => deps.store.listWorkByPhase(p))
+          .map(workJson),
+      });
+    }
+
+    // GET /api/v1/repos/:o/:r/work/:n — the whole work item: intent, change
+    // (+ diff), attempts ledger, blockers, comments.
+    wm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/work\/(\d+)$/);
+    if (req.method === "GET" && wm) {
+      const [, owner, repo, num] = wm as unknown as [
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, repo, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const n = Number(num);
+      const item = deps.store.getIssue(owner, repo, n);
+      if (!item) return json({ error: "not found" }, 404);
+      const shaped = workJson(item);
+      const diff =
+        item.head_ref && item.base_ref
+          ? await deps.git.diffStat(owner, repo, item.base_ref, item.head_ref)
+          : null;
+      return json({
+        ...shaped,
+        change: shaped.change
+          ? {
+              ...shaped.change,
+              diffStat:
+                diff?.status === "ok" ? diff.value : { files: [], patch: "" },
+            }
+          : null,
+        attempts: deps.store.listAttempts(owner, repo, n).map((a) => ({
+          attempt: a.attempt,
+          headSha: a.head_sha,
+          verdict: a.verdict,
+          verdictLine: a.verdict_line,
+          builderCostUsd: a.builder_cost_usd,
+          reviewerCostUsd: a.reviewer_cost_usd,
+          createdAt: a.created_at,
+        })),
+        comments: deps.store.listComments(owner, repo, n),
+      });
+    }
+
+    // POST /api/v1/repos/:o/:r/work/:n/{queue,comments,close,merge,deps}
+    wm = path.match(
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/work\/(\d+)\/(queue|comments|close|merge|deps)$/,
+    );
+    if (req.method === "POST" && wm) {
+      const [, owner, repo, num, action] = wm as unknown as [
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const n = Number(num);
+      if (action === "queue") {
+        const r = deps.forge.queueWork(user, owner, repo, n);
+        if (r.status === "error") return fail(r.error);
+        deps.kickCrew();
+        return json({ ok: true, phase: "queued" });
+      }
+      if (action === "comments") {
+        const body = (await req.json().catch(() => null)) as {
+          body?: string;
+        } | null;
+        const c = deps.forge.comment(user, owner, repo, n, body?.body ?? "");
+        if (c.status === "error") return fail(c.error);
+        return json(c.value, 201);
+      }
+      if (action === "close") {
+        const r = deps.forge.closeWork(user, owner, repo, n);
+        if (r.status === "error") return fail(r.error);
+        void deps.reconciler.kickAll(); // an open change closed too — prune its preview
+        return json({ ok: true });
+      }
+      if (action === "merge") {
+        const merged = await deps.forge.mergeWork(user, owner, repo, n);
+        if (merged.status === "error") return fail(merged.error);
+        void deps.reconciler.kickAll(); // ship the merge + tear down the preview
+        deps.kickCrew(); // shipping may unblock dependent work
+        return json(workJson(merged.value));
+      }
+      // deps: declare "blocked by owner/repo#n" (same-owner, enforced in forge).
+      const body = (await req.json().catch(() => null)) as {
+        on?: string;
+      } | null;
+      const on = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/.exec(body?.on ?? "");
+      if (!on) return json({ error: 'dep must be {on: "owner/repo#n"}' }, 400);
+      const r = deps.forge.addWorkDep(
+        user,
+        { owner, repo, number: n },
+        { owner: on[1]!, repo: on[2]!, number: Number(on[3]) },
+      );
+      if (r.status === "error") return fail(r.error);
+      return json({ ok: true, blockedBy: blockersOf(owner, repo, n) }, 201);
+    }
+
+    // DELETE /api/v1/repos/:o/:r/work/:n/deps/:do/:dr/:dn
+    wm = path.match(
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/work\/(\d+)\/deps\/([^/]+)\/([^/]+)\/(\d+)$/,
+    );
+    if (req.method === "DELETE" && wm) {
+      const [, owner, repo, num, dOwner, dRepo, dNum] = wm as unknown as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const n = Number(num);
+      const r = deps.forge.removeWorkDep(
+        user,
+        { owner, repo, number: n },
+        { owner: dOwner, repo: dRepo, number: Number(dNum) },
+      );
+      if (r.status === "error") return fail(r.error);
+      deps.kickCrew(); // a now-unblocked item may be ready
+      return json({ ok: true, blockedBy: blockersOf(owner, repo, n) });
+    }
+
+    // ── compat, one release: /pulls as thin reads ────────────────────────
+    // The list is work items with a live change shaped like the old PR JSON;
+    // :num resolves via the FROZEN pull_requests table (historic numbers only
+    // — no new PR numbers are ever minted).
+    let pm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls$/);
+    if (req.method === "GET" && pm) {
+      const [, owner, repo] = pm as unknown as [string, string, string];
+      if (!isValidName(owner) || !isValidName(repo))
+        return json({ error: "invalid" }, 400);
+      const user = await deps.forge.authenticate(req);
+      if (!user || !deps.forge.authorize(user, owner, repo, "read"))
+        return json({ error: "unauthorized" }, user ? 403 : 401);
+      const pulls = deps.store
+        .listOpenChanges()
+        .filter((w) => w.owner === owner && w.repo === repo)
+        .map((w) => ({
+          owner: w.owner,
+          repo: w.repo,
+          number: w.number,
+          title: w.title,
+          head_ref: w.head_ref,
+          base_ref: w.base_ref,
+          state: "open",
+          author: w.author,
+          created_at: w.created_at,
+        }));
+      return json({ pulls });
+    }
+
     pm = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
     if (req.method === "GET" && pm) {
       const [, owner, repo, num] = pm as unknown as [
@@ -516,42 +766,6 @@ export function apiRouter(
         ...pr,
         diff: diff.status === "ok" ? diff.value : { files: [], patch: "" },
       });
-    }
-
-    // POST /api/v1/repos/:o/:n/pulls/:num/{merge,close}
-    pm = path.match(
-      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/(merge|close)$/,
-    );
-    if (req.method === "POST" && pm) {
-      const [, owner, repo, num, action] = pm as unknown as [
-        string,
-        string,
-        string,
-        string,
-        string,
-      ];
-      if (!isValidName(owner) || !isValidName(repo))
-        return json({ error: "invalid" }, 400);
-      const user = await deps.forge.authenticate(req);
-      if (!user) return json({ error: "unauthorized" }, 401);
-      if (action === "merge") {
-        const merged = await deps.forge.mergePr(user, owner, repo, Number(num));
-        if (merged.status === "error")
-          return json(
-            { error: merged.error.message },
-            merged.error.code === "unauthorized" ? 403 : 400,
-          );
-        void deps.reconciler.kickAll(); // ship the merge + tear down the preview
-        return json(merged.value);
-      }
-      const closed = deps.forge.closePr(user, owner, repo, Number(num));
-      if (closed.status === "error")
-        return json(
-          { error: closed.error.message },
-          closed.error.code === "unauthorized" ? 403 : 400,
-        );
-      void deps.reconciler.kickAll();
-      return json({ ok: true });
     }
 
     // POST /api/v1/repos/:o/:r/issues/draft — compose a rough idea into a
@@ -620,7 +834,15 @@ export function apiRouter(
       return json(draft);
     }
 
-    // ── issues ───────────────────────────────────────────────────────────
+    // ── compat, one release: /issues as thin reads over the same rows ─────
+    // Work items ARE issues (identity — same numbers). Two verbs survive:
+    // create (delegates to createWork semantics, so birth phase applies) and
+    // the label write (the agent-work queue verb external clients speak).
+    const sameRepoBlockers = (owner: string, repo: string, n: number) =>
+      deps.store
+        .openWorkBlockers(owner, repo, n)
+        .filter((b) => b.on_owner === owner && b.on_repo === repo)
+        .map((b) => b.on_number);
     let im = path.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues$/);
     if (im) {
       const [, owner, repo] = im as unknown as [string, string, string];
@@ -633,7 +855,7 @@ export function apiRouter(
         const state = url.searchParams.get("state") ?? undefined;
         const issues = deps.store.listIssues(owner, repo, state).map((i) => ({
           ...i,
-          openBlockers: deps.store.openBlockers(owner, repo, i.number),
+          openBlockers: sameRepoBlockers(owner, repo, i.number),
         }));
         return json({ issues });
       }
@@ -646,17 +868,13 @@ export function apiRouter(
           labels?: string[];
         } | null;
         if (!body?.title) return json({ error: "title required" }, 400);
-        const issue = deps.forge.createIssue(user, owner, repo, {
+        const issue = await deps.forge.createWork(user, owner, repo, {
           title: body.title,
           ...(body.body ? { body: body.body } : {}),
           ...(body.labels ? { labels: body.labels } : {}),
         });
-        if (issue.status === "error")
-          return json(
-            { error: issue.error.message },
-            issue.error.code === "not_found" ? 404 : 400,
-          );
-        deps.kickCrew(); // an agent-work issue wakes the crew
+        if (issue.status === "error") return fail(issue.error);
+        if (issue.value.phase === "queued") deps.kickCrew(); // born queued wakes the crew
         return json(issue.value, 201);
       }
     }
@@ -680,18 +898,23 @@ export function apiRouter(
       return json({
         ...issue,
         comments: deps.store.listComments(owner, repo, Number(num)),
-        blockedBy: deps.store.listIssueBlockers(owner, repo, Number(num)),
-        openBlockers: deps.store.openBlockers(owner, repo, Number(num)),
+        blockedBy: deps.store
+          .listWorkDeps(owner, repo, Number(num))
+          .filter((d) => d.on_owner === owner && d.on_repo === repo)
+          .map((d) => d.on_number),
+        openBlockers: sameRepoBlockers(owner, repo, Number(num)),
       });
     }
 
-    // POST /api/v1/repos/:o/:n/issues/:num/{comments,labels,close,deps}
+    // POST /api/v1/repos/:o/:n/issues/:num/labels — the queue verb external
+    // clients still speak. Labels are taxonomy; the ONLY phase effect is the
+    // intent → queued edge when agent-work appears. A label write never moves
+    // any other phase.
     im = path.match(
-      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/(comments|labels|close|deps)$/,
+      /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/labels$/,
     );
     if (req.method === "POST" && im) {
-      const [, owner, repo, num, action] = im as unknown as [
-        string,
+      const [, owner, repo, num] = im as unknown as [
         string,
         string,
         string,
@@ -702,94 +925,40 @@ export function apiRouter(
       const user = await deps.forge.authenticate(req);
       if (!user) return json({ error: "unauthorized" }, 401);
       const n = Number(num);
-      if (action === "comments") {
-        const body = (await req.json().catch(() => null)) as {
-          body?: string;
-        } | null;
-        const c = deps.forge.comment(user, owner, repo, n, body?.body ?? "");
-        if (c.status === "error") return json({ error: c.error.message }, 400);
-        return json(c.value, 201);
-      }
-      if (action === "labels") {
-        const body = (await req.json().catch(() => null)) as {
-          labels?: string[];
-        } | null;
-        const r = deps.forge.setIssueLabels(
-          user,
-          owner,
-          repo,
-          n,
-          body?.labels ?? [],
-        );
-        if (r.status === "error")
-          return json(
-            { error: r.error.message },
-            r.error.code === "unauthorized" ? 403 : 400,
-          );
-        deps.kickCrew(); // labeling agent-work wakes the crew
-        return json(r.value);
-      }
-      if (action === "deps") {
-        const body = (await req.json().catch(() => null)) as {
-          blockedBy?: number;
-          remove?: boolean;
-        } | null;
-        const blockedBy = Number(body?.blockedBy);
-        if (!Number.isInteger(blockedBy))
-          return json({ error: "blockedBy (issue number) required" }, 400);
-        const r = body?.remove
-          ? deps.forge.removeIssueDep(user, owner, repo, n, blockedBy)
-          : deps.forge.setIssueDep(user, owner, repo, n, blockedBy);
-        if (r.status === "error")
-          return json(
-            { error: r.error.message },
-            r.error.code === "unauthorized"
-              ? 403
-              : r.error.code === "not_found"
-                ? 404
-                : 400,
-          );
-        // A now-unblocked issue may be ready — nudge the crew.
-        deps.kickCrew();
-        return json({
-          ok: true,
-          blockedBy: deps.store.listIssueBlockers(owner, repo, n),
-        });
-      }
-      const closed = deps.forge.closeIssue(user, owner, repo, n);
-      if (closed.status === "error")
-        return json(
-          { error: closed.error.message },
-          closed.error.code === "unauthorized" ? 403 : 400,
-        );
-      return json({ ok: true });
+      const body = (await req.json().catch(() => null)) as {
+        labels?: string[];
+      } | null;
+      const labels = body?.labels ?? [];
+      const r = deps.forge.setIssueLabels(user, owner, repo, n, labels);
+      if (r.status === "error") return fail(r.error);
+      if (
+        labels.some((l) => l.trim().toLowerCase() === "agent-work") &&
+        deps.store.getIssue(owner, repo, n)?.phase === "intent"
+      )
+        deps.forge.queueWork(user, owner, repo, n);
+      deps.kickCrew(); // labeling agent-work wakes the crew
+      return json(r.value);
     }
 
-    // GET /api/v1/crew — the crew's cross-app queue: what's actively building/
-    // reviewing/reworking/queued, and what's blocked on a human. Feeds the
-    // header pill (counts) and the /crew page (items).
+    // GET /api/v1/crew — the crew's cross-app queue by phase: what's actively
+    // building/reviewing/reworking/queued, and what's parked on a human.
+    // Feeds the header pill (counts) and the /crew page (items).
     if (req.method === "GET" && path === "/api/v1/crew") {
       const user = await deps.forge.authenticate(req);
       if (!user) return json({ error: "unauthorized" }, 401);
-      const byLabel = (label: string, phase: string) =>
-        deps.store.listIssuesByLabel(label).map((i) => ({
-          owner: i.owner,
-          repo: i.repo,
-          number: i.number,
-          title: i.title,
-          phase,
-        }));
-      const blocked = [
-        ...byLabel("agent-review-failed", "needs review"),
-        ...byLabel("agent-failed", "failed"),
-      ];
-      const working = [
-        ...byLabel("agent-building", "building"),
-        ...byLabel("agent-reworking", "reworking"),
-        ...byLabel("agent-reviewing", "reviewing"),
-        ...byLabel("agent-work", "queued"),
-      ];
-      // Blocked first (needs attention), then in-progress.
+      const shape = (i: IssueRow) => ({
+        owner: i.owner,
+        repo: i.repo,
+        number: i.number,
+        title: i.title,
+        phase: i.phase,
+        parkedReason: i.parked_reason,
+      });
+      // Parked first (needs a human), then in-flight.
+      const blocked = deps.store.listWorkByPhase("parked").map(shape);
+      const working = (
+        ["building", "reworking", "reviewing", "queued"] as const
+      ).flatMap((p) => deps.store.listWorkByPhase(p).map(shape));
       return json({
         working: working.length,
         blocked: blocked.length,

@@ -756,11 +756,21 @@ export class Store {
     );
   }
 
-  // ── issues ────────────────────────────────────────────────────────────
+  // ── issues (work items) ─────────────────────────────────────────────────
+  /** Create a work item. Birth phase is a creation fact, not a transition:
+   *  plain intent by default, `queued` when filed with the agent-work verb,
+   *  or `reviewing` with a pre-attached change (the human-pushed-branch path). */
   createIssue(
     owner: string,
     repo: string,
-    fields: { title: string; body: string; author: string; labels: string[] },
+    fields: {
+      title: string;
+      body: string;
+      author: string;
+      labels: string[];
+      phase?: Extract<WorkPhase, "intent" | "queued" | "reviewing">;
+      change?: { head: string; base: string };
+    },
   ): IssueRow {
     return this.db.transaction(() => {
       const max =
@@ -781,15 +791,16 @@ export class Store {
         labels: fields.labels.join(","),
         author: fields.author,
         created_at: Date.now(),
-        phase: "intent",
-        head_ref: null,
-        base_ref: null,
-        change_state: null,
+        phase: fields.phase ?? "intent",
+        head_ref: fields.change?.head ?? null,
+        base_ref: fields.change?.base ?? null,
+        change_state: fields.change ? "open" : null,
         parked_reason: null,
       };
       this.db.run(
-        `INSERT INTO issues (id, owner, repo, number, title, body, state, labels, author, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO issues (id, owner, repo, number, title, body, state, labels, author, created_at,
+                             phase, head_ref, base_ref, change_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           row.id,
           owner,
@@ -801,6 +812,10 @@ export class Store {
           row.labels,
           row.author,
           row.created_at,
+          row.phase,
+          row.head_ref,
+          row.base_ref,
+          row.change_state,
         ],
       );
       return row;
@@ -1079,6 +1094,30 @@ export class Store {
       );
       return attempt;
     })();
+  }
+
+  /** Stamp the build half of an attempt once the builder returns. */
+  setAttemptBuilder(
+    owner: string,
+    repo: string,
+    number: number,
+    attempt: number,
+    fields: { builderCostUsd?: number; headSha?: string },
+  ): void {
+    this.db.run(
+      `UPDATE work_attempts SET
+         builder_cost_usd = COALESCE(?, builder_cost_usd),
+         head_sha = COALESCE(?, head_sha)
+       WHERE owner = ? AND repo = ? AND number = ? AND attempt = ?`,
+      [
+        fields.builderCostUsd ?? null,
+        fields.headSha ?? null,
+        owner,
+        repo,
+        number,
+        attempt,
+      ],
+    );
   }
 
   setAttemptVerdict(

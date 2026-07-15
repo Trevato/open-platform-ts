@@ -85,6 +85,32 @@ afterEach(() => {
   dirs = [];
 });
 
+/** File a work item at `queued` (the agent-work verb's birth phase). */
+function fileWork(
+  h: Awaited<ReturnType<typeof harness>>,
+  repo: string,
+  fields: { title: string; body: string },
+) {
+  return h.store.createIssue("plat", repo, {
+    ...fields,
+    author: "plat",
+    labels: ["agent-work"],
+    phase: "queued",
+  });
+}
+
+/** Claim a queued item (what the dispatcher does before runBuilder) — the
+ *  builder-direct tests need the item at `building` for attachChange. */
+function claimed(
+  h: Awaited<ReturnType<typeof harness>>,
+  repo: string,
+  fields: { title: string; body: string },
+) {
+  const item = fileWork(h, repo, fields);
+  h.store.claimWork("plat", repo, item.number);
+  return item;
+}
+
 async function harness() {
   const dir = mkdtempSync(join(tmpdir(), "op-crew-"));
   dirs.push(dir);
@@ -128,23 +154,22 @@ function builderDeps(
 }
 
 describe("builder", () => {
-  test("clones, lets the agent edit, commits the backstop, pushes, opens a PR", async () => {
+  test("clones, lets the agent edit, commits the backstop, pushes, attaches the change", async () => {
     const h = await harness();
-    const issue = h.store.createIssue("plat", "app", {
+    const issue = claimed(h, "app", {
       title: "add a health endpoint",
       body: "return ok from /health",
-      author: "plat",
-      labels: ["agent-work"],
     });
     const built = Result.unwrap(
       await runBuilder(builderDeps(h, fakeAgentWritesFeature, h.admin), issue),
     );
-    expect(built.prNumber).toBe(1);
     expect(built.costUsd).toBe(0.05);
 
-    // The PR exists, head branch carries the change, ISSUE.md was NOT shipped.
-    const pr = h.store.getPr("plat", "app", 1);
-    expect(pr?.head_ref).toBe("agent/issue-1");
+    // The change is attached, the branch carries it, ISSUE.md was NOT shipped.
+    const item = h.store.getIssue("plat", "app", 1)!;
+    expect(item.head_ref).toBe("agent/issue-1");
+    expect(item.change_state).toBe("open");
+    expect(item.phase).toBe("reviewing");
     expect(
       (await h.git.readFile("plat", "app", "agent/issue-1", "FEATURE.md"))
         .status,
@@ -154,19 +179,14 @@ describe("builder", () => {
     ).toBe("error");
   });
 
-  test("an agent that changes nothing fails loudly (no empty PR)", async () => {
+  test("an agent that changes nothing fails loudly (no empty change)", async () => {
     const h = await harness();
     const noop: RunAgent = async () =>
       Result.ok({ ok: true, result: "nothing to do", costUsd: 0, numTurns: 1 });
-    const issue = h.store.createIssue("plat", "app", {
-      title: "x",
-      body: "",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    const issue = claimed(h, "app", { title: "x", body: "" });
     const built = await runBuilder(builderDeps(h, noop, h.admin), issue);
     expect(built.status).toBe("error");
-    expect(h.store.getPr("plat", "app", 1)).toBeNull();
+    expect(h.store.getIssue("plat", "app", 1)?.change_state).toBeNull();
   });
 
   // Authored by the crew itself (plat/opd#1) — the editable-path allowlist.
@@ -188,11 +208,9 @@ describe("builder", () => {
         numTurns: 1,
       });
     };
-    const issue = h.store.createIssue("plat", "platform", {
+    const issue = claimed(h, "platform", {
       title: "sneak in a source edit",
       body: "",
-      author: "plat",
-      labels: ["agent-work"],
     });
     const built = await runBuilder(builderDeps(h, sneakyAgent, h.admin), issue);
     expect(built.status).toBe("error");
@@ -200,7 +218,7 @@ describe("builder", () => {
       expect(built.error.message).toContain(
         "edit outside the allowlist: server.ts",
       );
-    expect(h.store.getPr("plat", "platform", 1)).toBeNull();
+    expect(h.store.getIssue("plat", "platform", 1)?.change_state).toBeNull();
   });
 
   test("plat/platform: allows crew/**/*.md and platform.json edits", async () => {
@@ -223,20 +241,18 @@ describe("builder", () => {
         numTurns: 1,
       });
     };
-    const issue = h.store.createIssue("plat", "platform", {
+    const issue = claimed(h, "platform", {
       title: "tweak the builder prompt",
       body: "",
-      author: "plat",
-      labels: ["agent-work"],
     });
     const built = await runBuilder(builderDeps(h, configAgent, h.admin), issue);
     expect(built.status).toBe("ok");
   });
 });
 
-// tick() fires process() unawaited, so poll until the issue reaches a terminal
-// label (the full flow is build → review → merge, with real git + fetches).
-const TERMINAL = ["agent-shipped", "agent-failed", "agent-review-failed"];
+// tick() fires process() unawaited, so poll until the item reaches a terminal
+// or parked phase (the full flow is build → review → merge, real git + fetches).
+const SETTLED = ["shipped", "parked", "closed"];
 async function settle(
   h: Awaited<ReturnType<typeof harness>>,
   num = 1,
@@ -246,8 +262,7 @@ async function settle(
   const start = performance.now();
   while (performance.now() - start < timeoutMs) {
     const issue = h.store.getIssue("plat", repo, num);
-    const labels = issue?.labels.split(",") ?? [];
-    if (TERMINAL.some((t) => labels.includes(t))) return;
+    if (issue && SETTLED.includes(issue.phase)) return;
     await Bun.sleep(40);
   }
 }
@@ -290,32 +305,30 @@ describe("dispatcher", () => {
         kickReconciler: () => void reconcileKicks++,
       }),
     );
-    h.store.createIssue("plat", "app", {
-      title: "build me",
-      body: "please",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "build me", body: "please" });
 
-    // Fire several ticks at once — idempotency must build exactly one PR.
+    // Fire several ticks at once — the CAS claim must build exactly once.
     await Promise.all([d.tick(), d.tick(), d.tick()]);
     await settle(h);
 
     expect(builds).toBe(1);
-    const pr = h.store.getPr("plat", "app", 1);
-    expect(pr?.number).toBe(1);
-    expect(pr?.state).toBe("merged"); // auto-merged on a passing verdict
     const issue = h.store.getIssue("plat", "app", 1)!;
-    expect(issue.labels.split(",")).toContain("agent-shipped");
-    expect(issue.state).toBe("closed");
+    expect(issue.phase).toBe("shipped");
+    expect(issue.change_state).toBe("merged"); // auto-merged on a passing verdict
+    expect(issue.state).toBe("closed"); // derived mirror
     expect(reconcileKicks).toBe(2); // once for the preview, once to ship the merge
+    // The attempts ledger recorded the run.
+    const attempts = h.store.listAttempts("plat", "app", 1);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.verdict).toBe("pass");
+    expect(attempts[0]?.builder_cost_usd).toBe(0.01);
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
       .join("\n");
-    expect(comments).toContain("Opened PR #1");
+    expect(comments).toContain("Change attached");
     expect(comments).toContain("✅ PASS");
-    expect(comments).toContain("Merged PR #1");
+    expect(comments).toContain("Merged and shipping");
   });
 
   test("review FAILs with rework disabled → PR left open for a human", async () => {
@@ -329,27 +342,20 @@ describe("dispatcher", () => {
         },
       ),
     );
-    h.store.createIssue("plat", "app", {
-      title: "guestbook",
-      body: "messages",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "guestbook", body: "messages" });
     await d.tick();
     await settle(h);
 
-    const pr = h.store.getPr("plat", "app", 1);
-    expect(pr?.number).toBe(1); // the PR exists…
-    expect(pr?.state).toBe("open"); // …but was NOT merged
     const issue = h.store.getIssue("plat", "app", 1)!;
-    expect(issue.labels.split(",")).toContain("agent-review-failed");
-    expect(issue.labels.split(",")).not.toContain("agent-shipped");
+    expect(issue.change_state).toBe("open"); // the change exists, NOT merged
+    expect(issue.phase).toBe("parked");
+    expect(issue.parked_reason).toBe("rework-exhausted");
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("❌ FAIL");
-    expect(comments).toContain("left open for a human");
+    expect(comments).toContain("left for a human");
   });
 
   test("rework: ❌ then a fix that passes → auto-merges + ships", async () => {
@@ -381,26 +387,26 @@ describe("dispatcher", () => {
     const d = new Dispatcher(
       dispatcherReviewDeps(h, runAgent, { maxRework: 1 }),
     );
-    h.store.createIssue("plat", "app", {
-      title: "widget",
-      body: "b",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "widget", body: "b" });
     await d.tick();
     await settle(h);
 
     expect(builds).toBe(2); // initial build + one rework
     expect(reviews).toBe(2); // reviewed before and after the fix
-    expect(h.store.getPr("plat", "app", 1)?.state).toBe("merged");
     const issue = h.store.getIssue("plat", "app", 1)!;
-    expect(issue.labels.split(",")).toContain("agent-shipped");
+    expect(issue.phase).toBe("shipped");
+    expect(issue.change_state).toBe("merged");
+    // Both attempts in the ledger, first failed, second passed.
+    const verdicts = h.store
+      .listAttempts("plat", "app", 1)
+      .map((a) => a.verdict);
+    expect(verdicts).toEqual(["fail", "pass"]);
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("Reworking to fix");
-    expect(comments).toContain("Merged PR #1");
+    expect(comments).toContain("Merged and shipping");
   });
 
   test("forceFirstReviewFail hook: injects a ❌, then the real re-review ships", async () => {
@@ -432,25 +438,20 @@ describe("dispatcher", () => {
         forceFirstReviewFail: "add a length limit",
       }),
     );
-    h.store.createIssue("plat", "app", {
-      title: "board",
-      body: "b",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "board", body: "b" });
     await d.tick();
     await settle(h);
 
     expect(builds).toBe(2); // initial + one rework
     expect(reviews).toBe(1); // the first verdict was injected, not a real review
-    expect(h.store.getPr("plat", "app", 1)?.state).toBe("merged");
+    expect(h.store.getIssue("plat", "app", 1)?.change_state).toBe("merged");
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("add a length limit");
     expect(comments).toContain("demonstrate auto-rework");
-    expect(comments).toContain("Merged PR #1");
+    expect(comments).toContain("Merged and shipping");
   });
 
   test("rework exhausted: persistent ❌ → parked after N attempts", async () => {
@@ -479,20 +480,16 @@ describe("dispatcher", () => {
     const d = new Dispatcher(
       dispatcherReviewDeps(h, runAgent, { maxRework: 1 }),
     );
-    h.store.createIssue("plat", "app", {
-      title: "widget",
-      body: "b",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "widget", body: "b" });
     await d.tick();
     await settle(h);
 
     expect(builds).toBe(2); // initial + one rework, then gives up
     expect(reviews).toBe(2);
-    expect(h.store.getPr("plat", "app", 1)?.state).toBe("open");
     const issue = h.store.getIssue("plat", "app", 1)!;
-    expect(issue.labels.split(",")).toContain("agent-review-failed");
+    expect(issue.change_state).toBe("open"); // left for a human
+    expect(issue.phase).toBe("parked");
+    expect(issue.parked_reason).toBe("rework-exhausted");
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
@@ -516,19 +513,15 @@ describe("dispatcher", () => {
     const d = new Dispatcher(
       dispatcherReviewDeps(h, runAgent, { previewIsUp: async () => false }),
     );
-    h.store.createIssue("plat", "app", {
-      title: "x",
-      body: "",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "x", body: "" });
     await d.tick();
     await settle(h);
 
     expect(reviewed).toBe(false); // never reviewed a preview that never came up
     const issue = h.store.getIssue("plat", "app", 1)!;
-    expect(issue.labels.split(",")).toContain("agent-failed");
-    expect(h.store.getPr("plat", "app", 1)?.state).toBe("open");
+    expect(issue.phase).toBe("parked");
+    expect(issue.parked_reason).toBe("preview-never-up");
+    expect(issue.change_state).toBe("open"); // the branch is left for a human
   });
 
   test("a plat/platform (self-mod) issue is PROPOSED for a human — no auto-merge, no review", async () => {
@@ -568,41 +561,32 @@ describe("dispatcher", () => {
       });
     };
     const d = new Dispatcher(dispatcherReviewDeps(h, runAgent));
-    h.store.createIssue("plat", "platform", {
-      title: "tweak the builder prompt",
-      body: "b",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "platform", { title: "tweak the builder prompt", body: "b" });
     await d.tick();
     await settle(h, 1, 20_000, "platform");
 
     expect(reviewed).toBe(false); // config repo: no preview → the reviewer never runs
-    const pr = h.store.getPr("plat", "platform", 1);
-    expect(pr?.number).toBe(1); // proposed…
-    expect(pr?.state).toBe("open"); // …but NOT auto-merged (human gate)
     const issue = h.store.getIssue("plat", "platform", 1)!;
-    expect(issue.labels.split(",")).toContain("agent-review-failed");
+    expect(issue.change_state).toBe("open"); // proposed, NOT auto-merged (human gate)
+    expect(issue.phase).toBe("parked");
+    expect(issue.parked_reason).toBe("self-repo-human-merge");
     const comments = h.store
       .listComments("plat", "platform", 1)
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("Proposed the change");
-    expect(comments).toContain("review the diff and merge");
+    expect(comments).toContain("review the diff and Merge");
   });
 
   test("without a credential, posts a note and does not build", async () => {
     const h = await harness();
     const d = new Dispatcher(dispatcherReviewDeps(h, null, { httpsPort: 443 }));
-    h.store.createIssue("plat", "app", {
-      title: "x",
-      body: "",
-      author: "plat",
-      labels: ["agent-work"],
-    });
+    fileWork(h, "app", { title: "x", body: "" });
     await d.tick();
     await Bun.sleep(50);
-    expect(h.store.getPr("plat", "app", 1)).toBeNull();
+    const issue = h.store.getIssue("plat", "app", 1)!;
+    expect(issue.phase).toBe("queued"); // stays queued until a credential appears
+    expect(issue.change_state).toBeNull();
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)

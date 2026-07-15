@@ -341,6 +341,15 @@ select:focus-visible { border-color: var(--ring); box-shadow: var(--ring-shadow)
 .list-row .ttl { font-size: 13.5px; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row .meta { display: flex; align-items: center; gap: 6px; }
 
+/* ── data tables (integration map) ───────────────────────────────────────── */
+.tablewrap { overflow-x: auto; }
+table.data { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+table.data th { text-align: left; padding: 6px 10px; border-bottom: var(--bw) solid var(--border);
+  text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--fs-xs); color: var(--faint); font-weight: 600; }
+table.data td { padding: 9px 10px; vertical-align: top;
+  border-bottom: var(--bw) solid color-mix(in oklab, var(--border) 60%, transparent); }
+table.data tr:last-child td { border-bottom: 0; }
+
 /* ── deploy timeline ─────────────────────────────────────────────────────── */
 .tl { display: flex; flex-direction: column; }
 .tl-ev { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 9px;

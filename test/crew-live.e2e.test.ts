@@ -1,7 +1,7 @@
 // Live crew on Sonnet 5, end to end: boot a platform with a real Claude token,
-// describe a feature in plain English, and assert the crew builds it, opens a
-// PR with a live preview, adversarially reviews it, and ships it — the whole
-// "describe → working software" loop against the real model.
+// describe a feature in plain English, and assert the crew builds it, attaches
+// a change with a live preview, adversarially reviews it, and ships it — the
+// whole "describe → working software" loop against the real model.
 //
 // Gated: runs ONLY with OP_CREW_LIVE=1 AND a CLAUDE_CODE_OAUTH_TOKEN present
 // (real model calls cost money and take minutes). It is NOT in the default
@@ -100,48 +100,43 @@ describe.skipIf(!LIVE)(
         ).json()) as { owner: string; app: string; issue: number };
         expect(on.app).toBeTruthy();
 
-        // Poll the issue until the crew reaches a terminal state.
-        const TERMINAL = [
-          "agent-shipped",
-          "agent-failed",
-          "agent-review-failed",
-        ];
+        // Poll the work item until the crew reaches a resting phase — phase
+        // is the process truth (labels are taxonomy only).
+        const TERMINAL = ["shipped", "parked", "closed"];
         const t0 = Date.now();
-        let labels: string[] = [];
-        let prOpened = false;
+        let phase = "";
+        let changeAttached = false;
         for (;;) {
           const data = (await (
-            await call(`/api/v1/repos/ada/${on.app}/issues/${on.issue}`, {
+            await call(`/api/v1/repos/ada/${on.app}/work/${on.issue}`, {
               auth: ada,
             })
-          ).json()) as { labels: string; comments: Array<{ body: string }> };
-          labels = data.labels.split(",").filter(Boolean);
-          if (
-            data.comments.some((c) =>
-              /Opened PR|Proposed the change/.test(c.body),
-            )
-          )
-            prOpened = true;
-          if (TERMINAL.some((t) => labels.includes(t))) break;
+          ).json()) as { phase: string; change: { head: string } | null };
+          phase = data.phase;
+          if (data.change) changeAttached = true;
+          if (TERMINAL.includes(phase)) break;
           if (Date.now() - t0 > 18 * 60_000) throw new Error("crew timed out");
           await Bun.sleep(5000);
         }
 
-        // The loop RAN: a PR was opened and a terminal verdict reached. We assert
-        // the happy path (shipped) but surface the verdict either way.
-        expect(prOpened).toBe(true);
-        if (!labels.includes("agent-shipped")) {
+        // The loop RAN: a change was attached and a resting phase reached. We
+        // assert the happy path (shipped) but surface the verdict either way.
+        expect(changeAttached).toBe(true);
+        if (phase !== "shipped") {
           const data = (await (
-            await call(`/api/v1/repos/ada/${on.app}/issues/${on.issue}`, {
+            await call(`/api/v1/repos/ada/${on.app}/work/${on.issue}`, {
               auth: ada,
             })
-          ).json()) as { comments: Array<{ body: string }> };
+          ).json()) as {
+            parkedReason: string | null;
+            comments: Array<{ body: string }>;
+          };
           const verdict = data.comments.map((c) => c.body).join("\n---\n");
           throw new Error(
-            `crew did not ship (labels: ${labels.join(",")}):\n${verdict}`,
+            `crew did not ship (phase: ${phase}, parked: ${data.parkedReason ?? "-"}):\n${verdict}`,
           );
         }
-        expect(labels).toContain("agent-shipped");
+        expect(phase).toBe("shipped");
 
         // Shipped means it's live in production — hit it.
         const res = await fetch(

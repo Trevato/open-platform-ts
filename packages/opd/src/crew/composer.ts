@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { Result, TaggedError, type Log } from "@op/core";
+import type { LoadAgent } from "../platform-config.ts";
 
 // The "curating not building" composer: a fast model turns a rough one-line
 // idea into a well-formed issue the human edits — a draft of the real object,
@@ -31,9 +32,21 @@ export interface ComposerEvent {
 
 const MODEL = process.env["OP_COMPOSER_MODEL"] ?? "claude-haiku-4-5";
 
+// Compiled-in FALLBACK only: the live prompt is crew/composer/instructions.md
+// in plat/platform (loaded per call via loadAgent, hot-editable like every
+// crew role). This copy serves when that read fails — fail-open to last-good,
+// the PlatformConfig convention. Genesis seeds the git copy from
+// genesis/platform/crew/composer/instructions.md; keep the two in step.
 const SYSTEM = `You are the platform's issue composer. Turn a rough one-line idea into a crisp issue for a caged AI builder that implements it end to end in a single-file Bun + bun:sqlite app served over OIDC.
 
 Emit an imperative title (<=60 chars); a 2-4 sentence body describing what to build; labels (always include "agent-work"); and 3-6 acceptance checks an adversary reviewer can verify over HTTP. ALWAYS fold the safety contract into the body: parameterized SQL only, escape user-controlled text, auth-gate every data path, keep the OIDC login and JSON-for-machines/HTML-for-browsers contract working, and idempotent migrations (preview runs on cloned prod data).`;
+
+async function systemFrom(load?: LoadAgent): Promise<string> {
+  if (!load) return SYSTEM;
+  const agent = await load("composer");
+  if (agent.status === "error") return SYSTEM;
+  return [agent.value.instructions, ...agent.value.skills].join("\n\n---\n\n");
+}
 
 // Grammar-constrained output — the SDK forces a synthetic tool matching this
 // schema, so the result's `structured_output` is already a conformant object.
@@ -108,6 +121,9 @@ export async function draftIssue(opts: {
   context?: string; // the app's server.ts, so drafts match its real routes
   oauthToken: string;
   log: Log;
+  /** Git-hot-reloadable prompt (crew/composer/); absent or unreadable → the
+   *  compiled-in SYSTEM. */
+  loadAgent?: LoadAgent;
   deadlineMs?: number;
   runQuery?: RunQuery; // test seam
   fetchImpl?: typeof fetch; // test seam for the raw-API fast path
@@ -116,6 +132,7 @@ export async function draftIssue(opts: {
 }): Promise<Result<IssueDraft, ComposerError>> {
   const idea = opts.idea.trim().slice(0, 500);
   if (!idea) return Result.err(new ComposerError({ message: "empty idea" }));
+  const system = await systemFrom(opts.loadAgent);
 
   // Fast lane: a REAL api key (not the oat token) skips the whole SDK subprocess
   // + cached-prompt tax — the raw Messages API with grammar-constrained output
@@ -124,6 +141,7 @@ export async function draftIssue(opts: {
   if (apiKey && apiKey.startsWith("sk-ant-api"))
     return draftViaApi(
       idea,
+      system,
       apiKey,
       opts.context,
       opts.deadlineMs ?? 30_000,
@@ -141,7 +159,7 @@ export async function draftIssue(opts: {
       prompt,
       options: {
         model: MODEL,
-        systemPrompt: SYSTEM,
+        systemPrompt: system,
         allowedTools: [],
         maxTurns: 4, // the structured-output tool call + finalize
         permissionMode: "bypassPermissions",
@@ -207,6 +225,7 @@ export async function draftIssue(opts: {
 // (output_config.format) returns valid JSON in ~1-3s with no subprocess.
 async function draftViaApi(
   idea: string,
+  system: string,
   apiKey: string,
   context: string | undefined,
   deadlineMs: number,
@@ -226,7 +245,7 @@ async function draftViaApi(
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 1024,
-        system: SYSTEM,
+        system,
         messages: [{ role: "user", content: userPrompt(idea, context) }],
         output_config: { format: { type: "json_schema", schema: SCHEMA } },
       }),

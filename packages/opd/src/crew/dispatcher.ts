@@ -12,13 +12,9 @@ import {
 import { runBuilder } from "./builder.ts";
 import { runReviewer } from "./reviewer.ts";
 
-const WORK_LABEL = "agent-work";
-const BUILDING_LABEL = "agent-building";
-const REVIEWING_LABEL = "agent-reviewing";
-const REWORK_LABEL = "agent-reworking";
-const SHIPPED_LABEL = "agent-shipped";
-const FAILED_LABEL = "agent-failed";
-const REVIEW_FAILED_LABEL = "agent-review-failed";
+// Labels are taxonomy only — the work-item `phase` column is the process
+// truth, enforced by the store's legal-edge table. `agent-import` survives
+// as taxonomy (role selection), `agent-work` as the human enqueue verb.
 
 export interface DispatcherDeps {
   sd: StateDir;
@@ -57,10 +53,10 @@ export interface DispatcherDeps {
 }
 
 /**
- * The crew dispatcher: watches for `agent-work` issues and drives the builder.
- * It is the SOLE writer of labels/comments for a run, so exactly one build
- * happens per issue even under concurrent sweep + kick. Runs on its own loop,
- * independent of the deploy reconciler.
+ * The crew dispatcher: watches queued work items and drives the builder.
+ * The store's claimWork CAS makes double-picks structurally impossible;
+ * the inflight set just avoids wasted claims within this process. Runs on
+ * its own loop, independent of the deploy reconciler.
  */
 export class Dispatcher {
   private readonly inflight = new Set<string>();
@@ -70,8 +66,34 @@ export class Dispatcher {
   constructor(private readonly deps: DispatcherDeps) {}
 
   start(sweepMs = this.deps.config().crew.sweepMs): void {
+    this.sweepStranded();
     this.timer = setInterval(() => void this.tick(), sweepMs);
     void this.tick();
+  }
+
+  /** Crash recovery: work stranded mid-flight by a daemon restart. Builds
+   *  restart from queued (park → re-queue keeps the ledger honest); an item
+   *  already in review resumes its review loop against the live preview. */
+  private sweepStranded(): void {
+    const { store } = this.deps;
+    for (const phase of ["building", "reworking"] as const) {
+      for (const item of store.listWorkByPhase(phase)) {
+        store.setWorkPhase(item.owner, item.repo, item.number, "parked", {
+          parkedReason: "daemon-restarted",
+        });
+        store.setWorkPhase(item.owner, item.repo, item.number, "queued");
+        this.comment(
+          item,
+          "🔁 The platform restarted mid-build; this work item was re-queued.",
+        );
+      }
+    }
+    for (const item of store.listWorkByPhase("reviewing")) {
+      const k = this.key(item);
+      if (this.inflight.has(k)) continue;
+      this.inflight.add(k);
+      void this.resumeReview(item).finally(() => this.inflight.delete(k));
+    }
   }
 
   stop(): void {
@@ -79,7 +101,7 @@ export class Dispatcher {
     this.timer = null;
   }
 
-  /** Explicit wake (called when an issue is labeled agent-work). */
+  /** Explicit wake (called when a work item is queued). */
   kick(): void {
     void this.tick();
   }
@@ -89,32 +111,36 @@ export class Dispatcher {
   }
 
   async tick(): Promise<void> {
-    const issues = this.deps.store.listIssuesByLabel(WORK_LABEL);
-    for (const issue of issues) {
-      const k = this.key(issue);
+    for (const item of this.deps.store.listWorkByPhase("queued")) {
+      const k = this.key(item);
       if (this.inflight.has(k)) continue;
-      // DAG flow control: don't start an issue while any blocker is still open.
-      // When the blocker ships (issue closed), a later tick picks this up — no
-      // explicit unblock needed, since openBlockers filters on state.
-      const blockers = this.deps.store.openBlockers(
-        issue.owner,
-        issue.repo,
-        issue.number,
+      // DAG flow control: a blocker counts as open until its phase is
+      // terminal. When it ships, a later tick picks this up.
+      const blockers = this.deps.store.openWorkBlockers(
+        item.owner,
+        item.repo,
+        item.number,
       );
       if (blockers.length > 0) continue;
-      // Claim BEFORE any await so a concurrent tick can't double-pick.
+      // Only build on repos that are deployed apps (so a preview appears) or
+      // the platform's own repos (proposed to a human).
+      if (!this.deps.store.getRepo(item.owner, item.repo)) continue;
+      if (!this.deps.runAgent || !this.deps.oauthToken) {
+        if (!this.notifiedNoCred) {
+          this.notifiedNoCred = true;
+          this.comment(
+            item,
+            "🤖 The crew isn't credentialed yet — set `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token`) and restart the platform. This work item will build once it's set.",
+          );
+        }
+        continue; // stays queued; builds the moment a credential appears
+      }
+      // The CAS claim: losing to a concurrent claimant is normal, not an error.
+      if (!this.deps.store.claimWork(item.owner, item.repo, item.number))
+        continue;
       this.inflight.add(k);
-      void this.process(issue).finally(() => this.inflight.delete(k));
+      void this.process(item).finally(() => this.inflight.delete(k));
     }
-  }
-
-  private setLabels(issue: IssueRow, labels: string[]): void {
-    this.deps.store.setIssueLabels(
-      issue.owner,
-      issue.repo,
-      issue.number,
-      labels,
-    );
   }
 
   private comment(issue: IssueRow, body: string): void {
@@ -127,32 +153,37 @@ export class Dispatcher {
     );
   }
 
+  /** Resume a review interrupted by a restart: the change is attached and the
+   *  preview (re)converges on boot, so pick the loop back up. */
+  private async resumeReview(item: IssueRow): Promise<void> {
+    if (!this.deps.runAgent || !this.deps.oauthToken) return; // stays reviewing
+    if (!item.head_ref) return;
+    this.comment(item, "🔁 The platform restarted; resuming the review.");
+    this.deps.kickReconciler();
+    const previewHost = `pr-${item.number}-${item.repo}-${item.owner}.${this.deps.domain}`;
+    if (!(await this.waitForPreview(previewHost)))
+      return this.park(
+        item,
+        "the preview never came back after a restart",
+        "preview-never-up",
+      );
+    await this.reviewLoop(item);
+  }
+
   private async process(issue: IssueRow): Promise<void> {
-    const { log } = this.deps;
+    const { log, store } = this.deps;
 
-    if (!this.deps.runAgent || !this.deps.oauthToken) {
-      if (!this.notifiedNoCred) {
-        this.notifiedNoCred = true;
-        this.comment(
-          issue,
-          "🤖 The crew isn't credentialed yet — set `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token`) and restart the platform. This issue will build once it's set.",
-        );
-      }
-      return;
-    }
-
-    // Only build issues on repos that are deployed apps (so a preview appears).
-    if (!this.deps.store.getRepo(issue.owner, issue.repo)) return;
-
-    // Move agent-work → agent-building so a sweep won't re-pick, and log start.
-    const labels = issue.labels.split(",").filter((l) => l && l !== WORK_LABEL);
-    this.setLabels(issue, [...labels, BUILDING_LABEL]);
     this.comment(
       issue,
       "🏗️ Build crew picked this up. Writing the change on a branch…",
     );
     log.info("crew: building", { issue: this.key(issue) });
 
+    const attempt = store.openWorkAttempt(
+      issue.owner,
+      issue.repo,
+      issue.number,
+    );
     const built = await runBuilder(this.builderDeps(issue), issue);
 
     if (built.status === "error") {
@@ -160,17 +191,17 @@ export class Dispatcher {
         issue: this.key(issue),
         error: built.error.message,
       });
-      this.setLabels(issue, [...labels, FAILED_LABEL]);
-      this.comment(
+      return this.park(
         issue,
-        `❌ Build failed: ${built.error.message}\n\nRe-add the \`agent-work\` label to retry.`,
+        `the build failed (${built.error.message})`,
+        "build-failed",
       );
-      return;
     }
+    store.setAttemptBuilder(issue.owner, issue.repo, issue.number, attempt, {
+      builderCostUsd: built.value.costUsd,
+    });
 
-    const pr = built.value.prNumber;
-    const port = this.portSuffix();
-    const prUrl = `https://${this.deps.domain}${port}/apps/${issue.owner}/${issue.repo}/pulls/${pr}`;
+    const branch = `agent/issue-${issue.number}`;
 
     // Self-modification: the platform's own config (plat/platform) or source
     // (plat/opd) is not a deployed app — there's no live preview to review. The
@@ -178,43 +209,49 @@ export class Dispatcher {
     // stakes, human gate — no auto-merge, no preview.
     if (isSelfRepo(issue.owner, issue.repo)) {
       const isConfig = issue.repo === PLAT.name;
-      this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
-      this.comment(
+      this.park(
         issue,
-        `🛠️ Proposed the change in PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). This edits the platform's own ${isConfig ? "config" : "source"} (\`${issue.owner}/${issue.repo}\`) — review the diff and merge. ${isConfig ? `A push to \`${PLAT.name}\` hot-reloads it; no restart.` : "Applying source changes needs `op upgrade` or a restart."}`,
+        `this edits the platform's own ${isConfig ? "config" : "source"}`,
+        "self-repo-human-merge",
+        `🛠️ Proposed the change on \`${branch}\` (cost $${built.value.costUsd.toFixed(2)}). This edits the platform's own ${isConfig ? "config" : "source"} (\`${issue.owner}/${issue.repo}\`) — review the diff and Merge. ${isConfig ? `A merge to \`${PLAT.name}\` hot-reloads it; no restart.` : "Applying source changes needs `op upgrade` or a restart."}`,
       );
-      log.info("crew: self-change proposed", { issue: this.key(issue), pr });
+      log.info("crew: self-change proposed", { issue: this.key(issue) });
       return;
     }
 
-    // The PR was opened in-process (no push event), so kick the reconciler to
-    // build its preview environment with forked data.
+    // The change was attached in-process (no push event), so kick the
+    // reconciler to build its preview environment with forked data.
     this.deps.kickReconciler();
-    const previewHost = `pr-${pr}-${issue.repo}-${issue.owner}.${this.deps.domain}`;
-    this.setLabels(issue, [...labels, REVIEWING_LABEL]);
+    const previewHost = `pr-${issue.number}-${issue.repo}-${issue.owner}.${this.deps.domain}`;
     this.comment(
       issue,
-      `🏗️ Opened PR #${pr} → ${prUrl} (cost $${built.value.costUsd.toFixed(2)}). Preview spinning up; the reviewer will test it.`,
+      `🏗️ Change attached on \`${branch}\` (cost $${built.value.costUsd.toFixed(2)}). Preview spinning up; the reviewer will test it.`,
     );
-    log.info("crew: PR opened", {
+    log.info("crew: change attached", {
       issue: this.key(issue),
-      pr,
       cost: built.value.costUsd,
     });
 
-    // Build → review → (rework on ❌)* until it passes or we give up.
-    const maxRework = this.deps.maxRework ?? this.deps.config().crew.maxRework;
-    let attempt = 0;
     if (!(await this.waitForPreview(previewHost)))
-      return this.park(
-        issue,
-        labels,
-        pr,
-        "the preview never came up",
-        FAILED_LABEL,
-      );
+      return this.park(issue, "the preview never came up", "preview-never-up");
+
+    await this.reviewLoop(issue);
+  }
+
+  /** Review → (rework on ❌)* until pass, park, or attempts run out. Shared
+   *  by fresh builds and restart-resumed reviews; attempt state lives in the
+   *  work_attempts ledger, so a crash never loses count. */
+  private async reviewLoop(issue: IssueRow): Promise<void> {
+    const { log, store } = this.deps;
+    const maxRework = this.deps.maxRework ?? this.deps.config().crew.maxRework;
 
     while (true) {
+      const priorAttempts = store.listAttempts(
+        issue.owner,
+        issue.repo,
+        issue.number,
+      );
+      const attemptNo = priorAttempts.at(-1)?.attempt ?? 1;
       this.comment(
         issue,
         "🔍 Reviewer testing the preview (sign-in, feature, injection, bad input)…",
@@ -224,7 +261,7 @@ export class Dispatcher {
         line: string;
         costUsd: number;
       };
-      if (attempt === 0 && this.deps.forceFirstReviewFail) {
+      if (attemptNo === 1 && this.deps.forceFirstReviewFail) {
         // Ops/demo hook: force a real, fixable blocker on the FIRST review so
         // the auto-rework loop runs end-to-end. The re-review below is real.
         v = {
@@ -240,17 +277,18 @@ export class Dispatcher {
         const verdict = await runReviewer(this.reviewerDeps(issue), {
           owner: issue.owner,
           repo: issue.repo,
-          prNumber: pr,
+          workNumber: issue.number,
           issueBody: issue.body,
           issueTitle: issue.title,
+          priorVerdicts: priorAttempts
+            .filter((a) => a.verdict_line)
+            .map((a) => a.verdict_line as string),
         });
         if (verdict.status === "error")
           return this.park(
             issue,
-            labels,
-            pr,
             `the review couldn't run (${verdict.error.message})`,
-            FAILED_LABEL,
+            "untestable",
           );
         v = verdict.value;
         this.comment(
@@ -258,42 +296,41 @@ export class Dispatcher {
           `${v.line}\n\n(reviewer cost $${v.costUsd.toFixed(2)})`,
         );
       }
+      store.setAttemptVerdict(
+        issue.owner,
+        issue.repo,
+        issue.number,
+        attemptNo,
+        {
+          verdict: v.kind,
+          verdictLine: v.line,
+          reviewerCostUsd: v.costUsd,
+        },
+      );
 
-      // ✅/⚠️ → auto-merge, ship, done. EXCEPT the platform's own config repo:
-      // a change to plat/platform alters the running daemon (prompts, tunables),
-      // so it never auto-merges — the crew PROPOSES, a human merges (the merge
-      // triggers the hot-reload). Higher stakes → a human gate.
+      // ✅/⚠️ → auto-merge, ship, done. (The platform's own repos never reach
+      // this loop — they park for a human at build time.)
       if (v.kind === "pass" || v.kind === "concerns") {
-        const merged = await this.deps.forge.mergePr(
+        const merged = await this.deps.forge.mergeWork(
           this.deps.systemActor,
           issue.owner,
           issue.repo,
-          pr,
+          issue.number,
         );
         if (merged.status === "error")
           return this.park(
             issue,
-            labels,
-            pr,
             `merge failed after a passing review (${merged.error.message})`,
-            FAILED_LABEL,
+            "merge-failed",
           );
         this.deps.kickReconciler(); // ship the merge + tear down the preview
-        this.setLabels(issue, [...labels, SHIPPED_LABEL]);
-        this.deps.store.setIssueState(
-          issue.owner,
-          issue.repo,
-          issue.number,
-          "closed",
-        );
         this.comment(
           issue,
-          `🚀 Merged PR #${pr} and shipping to production. Issue closed.`,
+          "🚀 Merged and shipping to production. Work item closed.",
         );
         log.info("crew: shipped", {
           issue: this.key(issue),
-          pr,
-          attempts: attempt + 1,
+          attempts: attemptNo,
         });
         return;
       }
@@ -302,81 +339,84 @@ export class Dispatcher {
       if (v.kind === "untestable")
         return this.park(
           issue,
-          labels,
-          pr,
           "the reviewer couldn't test the preview",
-          REVIEW_FAILED_LABEL,
+          "untestable",
         );
 
-      // ❌ FAIL — rework if attempts remain, else park.
-      if (attempt >= maxRework) {
-        this.setLabels(issue, [...labels, REVIEW_FAILED_LABEL]);
-        this.comment(
+      // ❌ FAIL — rework if attempts remain, else park. The ledger is the
+      // counter, so a restart mid-loop can't reset it.
+      if (attemptNo > maxRework) {
+        return this.park(
           issue,
-          `The reviewer still finds blockers after ${attempt + 1} attempt${attempt ? "s" : ""}. PR #${pr} is left open for a human.`,
+          `the reviewer still finds blockers after ${attemptNo} attempt${attemptNo > 1 ? "s" : ""}`,
+          "rework-exhausted",
         );
-        log.info("crew: rework exhausted", {
-          issue: this.key(issue),
-          pr,
-          attempts: attempt + 1,
-        });
-        return;
       }
-      attempt++;
-      this.setLabels(issue, [...labels, REWORK_LABEL]);
+      store.setWorkPhase(issue.owner, issue.repo, issue.number, "reworking");
+      const reworkNo = store.openWorkAttempt(
+        issue.owner,
+        issue.repo,
+        issue.number,
+      );
       this.comment(
         issue,
-        `🔧 Reworking to fix the reviewer's blockers (attempt ${attempt}/${maxRework})…`,
+        `🔧 Reworking to fix the reviewer's blockers (attempt ${reworkNo - 1}/${maxRework})…`,
       );
       const sinceTs = this.now();
       const reworked = await runBuilder(this.builderDeps(issue), issue, {
-        rework: { verdict: v.line, prNumber: pr, attempt },
+        rework: { verdict: v.line, attempt: reworkNo - 1 },
       });
       if (reworked.status === "error")
         return this.park(
           issue,
-          labels,
-          pr,
           `the rework failed (${reworked.error.message})`,
-          FAILED_LABEL,
+          "build-failed",
         );
+      store.setAttemptBuilder(issue.owner, issue.repo, issue.number, reworkNo, {
+        builderCostUsd: reworked.value.costUsd,
+      });
       this.deps.kickReconciler(); // rebuild the preview from the updated branch
-      this.setLabels(issue, [...labels, REVIEWING_LABEL]);
+      store.setWorkPhase(issue.owner, issue.repo, issue.number, "reviewing");
       this.comment(
         issue,
-        `Pushed the fix to PR #${pr}; rebuilding the preview to re-review…`,
+        "Pushed the fix; rebuilding the preview to re-review…",
       );
       if (
         !(await this.waitForPreviewRebuild(
           issue.owner,
           issue.repo,
-          pr,
+          issue.number,
           sinceTs,
         ))
       )
         return this.park(
           issue,
-          labels,
-          pr,
           "the reworked preview never came up",
-          FAILED_LABEL,
+          "preview-never-up",
         );
     }
   }
 
+  /** Park a work item for a human, from whatever active phase it's in. */
   private park(
     issue: IssueRow,
-    labels: string[],
-    pr: number,
     why: string,
-    label: string,
+    reason: string,
+    body?: string,
   ): void {
-    this.setLabels(issue, [...labels, label]);
+    this.deps.store.setWorkPhase(
+      issue.owner,
+      issue.repo,
+      issue.number,
+      "parked",
+      { parkedReason: reason },
+    );
     this.comment(
       issue,
-      `⚠️ Parked: ${why}. PR #${pr} is left open for a human.`,
+      body ??
+        `⚠️ Parked: ${why}. The change branch is left for a human — Merge or Re-queue from the console.`,
     );
-    this.deps.log.info("crew: parked", { issue: this.key(issue), pr, why });
+    this.deps.log.info("crew: parked", { issue: this.key(issue), why });
   }
 
   private builderDeps(issue: IssueRow) {

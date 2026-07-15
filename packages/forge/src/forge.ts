@@ -364,6 +364,327 @@ export class Forge {
     return created;
   }
 
+  // ── work items ──────────────────────────────────────────────────────────
+  // One unit of work: intent + at most one change + an attempts ledger. The
+  // PR is an implementation detail that no longer exists as a noun; the old
+  // pull-request ops below remain only until every caller has moved.
+
+  /** File a work item. Anyone may state intent on a public repo; attaching a
+   *  change (`head`) is a write intent and validates like the old createPr —
+   *  that item is born at `reviewing`, so human branches flow through the
+   *  same review machinery as crew branches. */
+  async createWork(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    fields: {
+      title: string;
+      body?: string;
+      labels?: string[];
+      head?: string;
+      base?: string;
+    },
+  ): Promise<Result<IssueRow, ForgeError>> {
+    const repoRow = this.store.getRepo(owner, repo);
+    if (!repoRow)
+      return Result.err(
+        new ForgeError({ message: "repo not found", code: "not_found" }),
+      );
+    const title = fields.title.trim();
+    if (!title)
+      return Result.err(
+        new ForgeError({ message: "title required", code: "invalid" }),
+      );
+    const labels = (fields.labels ?? [])
+      .map((l) => l.trim().toLowerCase())
+      .filter(Boolean);
+
+    let change: { head: string; base: string } | undefined;
+    if (fields.head) {
+      if (!this.authorize(actor, owner, repo, "write"))
+        return Result.err(
+          new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+        );
+      const base = fields.base ?? repoRow.default_branch;
+      if (fields.head === base)
+        return Result.err(
+          new ForgeError({
+            message: "head and base are the same branch",
+            code: "invalid",
+          }),
+        );
+      for (const ref of [fields.head, base]) {
+        const sha = await this.git.headSha(owner, repo, ref);
+        if (sha.status === "error")
+          return Result.err(
+            new ForgeError({
+              message: `no such branch: ${ref}`,
+              code: "invalid",
+            }),
+          );
+      }
+      change = { head: fields.head, base };
+    }
+
+    return Result.ok(
+      this.store.createIssue(owner, repo, {
+        title,
+        body: fields.body ?? "",
+        author: actor.username,
+        labels,
+        phase: change
+          ? "reviewing"
+          : labels.includes("agent-work")
+            ? "queued"
+            : "intent",
+        ...(change ? { change } : {}),
+      }),
+    );
+  }
+
+  /** Queue an intent for the crew (the agent-work label remains the verb;
+   *  this stamps the phase it implies). */
+  queueWork(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const item = this.store.getIssue(owner, repo, number);
+    if (!item)
+      return Result.err(
+        new ForgeError({ message: "work item not found", code: "not_found" }),
+      );
+    if (item.phase === "queued") return Result.ok(undefined);
+    try {
+      this.store.setWorkPhase(owner, repo, number, "queued");
+    } catch (cause) {
+      return Result.err(
+        new ForgeError({ message: String(cause), code: "invalid" }),
+      );
+    }
+    const labels = item.labels.split(",").filter(Boolean);
+    if (!labels.includes("agent-work"))
+      this.store.setIssueLabels(owner, repo, number, [...labels, "agent-work"]);
+    return Result.ok(undefined);
+  }
+
+  /** Attach the builder's change to a work item and hand it to review.
+   *  Validates branches exactly as opening a PR once did. */
+  async attachChange(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+    fields: { head: string; base?: string },
+  ): Promise<Result<IssueRow, ForgeError>> {
+    const repoRow = this.store.getRepo(owner, repo);
+    if (!repoRow)
+      return Result.err(
+        new ForgeError({ message: "repo not found", code: "not_found" }),
+      );
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const item = this.store.getIssue(owner, repo, number);
+    if (!item)
+      return Result.err(
+        new ForgeError({ message: "work item not found", code: "not_found" }),
+      );
+    const base = fields.base ?? repoRow.default_branch;
+    if (fields.head === base)
+      return Result.err(
+        new ForgeError({
+          message: "head and base are the same branch",
+          code: "invalid",
+        }),
+      );
+    for (const ref of [fields.head, base]) {
+      const sha = await this.git.headSha(owner, repo, ref);
+      if (sha.status === "error")
+        return Result.err(
+          new ForgeError({
+            message: `no such branch: ${ref}`,
+            code: "invalid",
+          }),
+        );
+    }
+    this.store.attachChange(owner, repo, number, { head: fields.head, base });
+    try {
+      this.store.setWorkPhase(owner, repo, number, "reviewing");
+    } catch (cause) {
+      return Result.err(
+        new ForgeError({ message: String(cause), code: "invalid" }),
+      );
+    }
+    return Result.ok(this.store.getIssue(owner, repo, number)!);
+  }
+
+  /** Merge a work item's change and ship it. The dispatcher calls this on a
+   *  passing verdict; a human calls it to rescue parked or self-repo items. */
+  async mergeWork(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+  ): Promise<Result<IssueRow, ForgeError>> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const item = this.store.getIssue(owner, repo, number);
+    if (!item)
+      return Result.err(
+        new ForgeError({ message: "work item not found", code: "not_found" }),
+      );
+    if (item.change_state !== "open" || !item.head_ref || !item.base_ref)
+      return Result.err(
+        new ForgeError({
+          message: item.change_state
+            ? `change is ${item.change_state}`
+            : "no change attached",
+          code: "invalid",
+        }),
+      );
+    const merged = await this.git.mergeBranch(
+      owner,
+      repo,
+      item.base_ref,
+      item.head_ref,
+      `Merge work item #${number}: ${item.title}`,
+    );
+    if (merged.status === "error")
+      return Result.err(
+        new ForgeError({ message: merged.error.message, code: "invalid" }),
+      );
+    try {
+      this.store.setWorkPhase(owner, repo, number, "shipped");
+    } catch (cause) {
+      // The branch is merged in git; a phase race here must surface loudly.
+      return Result.err(
+        new ForgeError({ message: String(cause), code: "invalid" }),
+      );
+    }
+    this.store.setChangeState(owner, repo, number, "merged");
+    return Result.ok(this.store.getIssue(owner, repo, number)!);
+  }
+
+  /** Close a work item from any non-terminal phase. An open change closes
+   *  with it, which is what tears down its preview on the next converge. */
+  closeWork(
+    actor: UserRow,
+    owner: string,
+    repo: string,
+    number: number,
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, owner, repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    const item = this.store.getIssue(owner, repo, number);
+    if (!item)
+      return Result.err(
+        new ForgeError({ message: "work item not found", code: "not_found" }),
+      );
+    try {
+      this.store.setWorkPhase(owner, repo, number, "closed");
+    } catch (cause) {
+      return Result.err(
+        new ForgeError({ message: String(cause), code: "invalid" }),
+      );
+    }
+    if (item.change_state === "open")
+      this.store.setChangeState(owner, repo, number, "closed");
+    return Result.ok(undefined);
+  }
+
+  /** Declare `item` blocked by `on`. Cross-repo, same-owner (the org
+   *  decomposer's shape: website blocked by shop#3); lifting the owner rule
+   *  later is one line, never a migration. The graph stays a DAG. */
+  addWorkDep(
+    actor: UserRow,
+    item: { owner: string; repo: string; number: number },
+    on: { owner: string; repo: string; number: number },
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, item.owner, item.repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    if (on.owner !== item.owner)
+      return Result.err(
+        new ForgeError({
+          message: "dependencies may not cross owners",
+          code: "invalid",
+        }),
+      );
+    const same =
+      item.owner === on.owner &&
+      item.repo === on.repo &&
+      item.number === on.number;
+    if (same)
+      return Result.err(
+        new ForgeError({
+          message: "a work item cannot block itself",
+          code: "invalid",
+        }),
+      );
+    if (!this.store.getIssue(item.owner, item.repo, item.number))
+      return Result.err(
+        new ForgeError({
+          message: `work item #${item.number} not found`,
+          code: "not_found",
+        }),
+      );
+    if (!this.store.getIssue(on.owner, on.repo, on.number))
+      return Result.err(
+        new ForgeError({
+          message: `blocker ${on.repo}#${on.number} not found`,
+          code: "not_found",
+        }),
+      );
+    // Cycle check over (owner, repo, number) triples: adding item→on is
+    // illegal if `on` already depends (transitively) on `item`.
+    const keyOf = (x: { owner: string; repo: string; number: number }) =>
+      `${x.owner}/${x.repo}#${x.number}`;
+    const target = keyOf(item);
+    const seen = new Set<string>();
+    const stack = [on];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (keyOf(cur) === target)
+        return Result.err(
+          new ForgeError({
+            message: `that dependency would create a cycle (${keyOf(on)} already depends on ${target})`,
+            code: "invalid",
+          }),
+        );
+      if (seen.has(keyOf(cur))) continue;
+      seen.add(keyOf(cur));
+      for (const d of this.store.listWorkDeps(cur.owner, cur.repo, cur.number))
+        stack.push({ owner: d.on_owner, repo: d.on_repo, number: d.on_number });
+    }
+    this.store.addWorkDep(item, on);
+    return Result.ok(undefined);
+  }
+
+  removeWorkDep(
+    actor: UserRow,
+    item: { owner: string; repo: string; number: number },
+    on: { owner: string; repo: string; number: number },
+  ): Result<void, ForgeError> {
+    if (!this.authorize(actor, item.owner, item.repo, "write"))
+      return Result.err(
+        new ForgeError({ message: "unauthorized", code: "unauthorized" }),
+      );
+    this.store.removeWorkDep(item, on);
+    return Result.ok(undefined);
+  }
+
   // ── pull requests ─────────────────────────────────────────────────────
   async createPr(
     actor: UserRow,
@@ -497,11 +818,17 @@ export class Forge {
         body: fields.body ?? "",
         author: actor.username,
         labels,
+        // The agent-work label is the enqueue verb; filing with it is a birth
+        // at queued, same as createWork.
+        phase: labels.includes("agent-work") ? "queued" : "intent",
       }),
     );
   }
 
-  /** Label changes are a write intent (they can trigger the crew). */
+  /** Label changes are a write intent. Labels are taxonomy — with ONE verb:
+   *  adding agent-work to an intent (or parked) item queues it for the crew.
+   *  It can never move an item that is building/reviewing/shipped — the
+   *  phase machine, not the label string, is the process truth. */
   setIssueLabels(
     actor: UserRow,
     owner: string,
@@ -520,7 +847,12 @@ export class Forge {
       );
     const clean = labels.map((l) => l.trim().toLowerCase()).filter(Boolean);
     this.store.setIssueLabels(owner, repo, number, clean);
-    return Result.ok({ ...issue, labels: clean.join(",") });
+    if (
+      clean.includes("agent-work") &&
+      (issue.phase === "intent" || issue.phase === "parked")
+    )
+      this.store.setWorkPhase(owner, repo, number, "queued");
+    return Result.ok(this.store.getIssue(owner, repo, number)!);
   }
 
   /**

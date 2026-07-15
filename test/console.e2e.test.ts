@@ -77,26 +77,26 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
         .status,
     ).toBe(201);
 
-    // Two issues on the app, one blocked by the other.
+    // Two work items on the app, one blocked by the other (the /work family).
     const i1 = (await (
       await post(
-        "/api/v1/repos/acme/store/issues",
+        "/api/v1/repos/acme/store/work",
         { title: "ship checkout" },
         ada,
       )
     ).json()) as { number: number };
     const i2 = (await (
-      await post("/api/v1/repos/acme/store/issues", { title: "add cart" }, ada)
+      await post("/api/v1/repos/acme/store/work", { title: "add cart" }, ada)
     ).json()) as { number: number };
     expect(
       (
         await post(
-          `/api/v1/repos/acme/store/issues/${i1.number}/deps`,
-          { blockedBy: i2.number },
+          `/api/v1/repos/acme/store/work/${i1.number}/deps`,
+          { on: `acme/store#${i2.number}` },
           ada,
         )
       ).status,
-    ).toBe(200);
+    ).toBe(201);
 
     // ── console renders ──────────────────────────────────────────────────
     const dash = await getHtml("/", ada);
@@ -120,15 +120,33 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
     expect(orgHtml).toContain("Acme Inc");
     expect(orgHtml).toContain("store"); // the org's software shows up
 
-    // The blocked issue surfaces its open blocker via the list API the console
-    // consumes (the pill is rendered client-side from openBlockers).
+    // The app page carries the ONE Work tab (the Issues/PRs twins are gone).
+    const appPage = await getHtml("/apps/acme/store", ada);
+    expect(appPage.status).toBe(200);
+    const appHtml = await appPage.text();
+    expect(appHtml).toContain('data-pane="work"');
+    expect(appHtml).not.toContain('data-pane="issues"');
+    expect(appHtml).not.toContain('data-pane="prs"');
+
+    // The blocked item surfaces its open blocker via the work list the console
+    // consumes (the pill is rendered client-side from blockedBy).
+    const work = (await (
+      await getHtml("/api/v1/repos/acme/store/work", ada)
+    ).json()) as {
+      work: Array<{ number: number; blockedBy: Array<{ number: number }> }>;
+    };
+    const blocked = work.work.find((i) => i.number === i1.number)!;
+    expect(blocked.blockedBy.map((b) => b.number)).toEqual([i2.number]);
+
+    // One-release compat: /issues reads the SAME rows and maps the same deps.
     const issues = (await (
       await getHtml("/api/v1/repos/acme/store/issues", ada)
     ).json()) as {
       issues: Array<{ number: number; openBlockers: number[] }>;
     };
-    const blocked = issues.issues.find((i) => i.number === i1.number)!;
-    expect(blocked.openBlockers).toEqual([i2.number]);
+    expect(
+      issues.issues.find((i) => i.number === i1.number)!.openBlockers,
+    ).toEqual([i2.number]);
 
     // ── on-ramp: describe a workflow → app + first build in one call ──────
     // (No Claude token here, so the composer is offline; the endpoint still
@@ -151,10 +169,29 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
     // Name was derived from the description (filler words dropped), not "app".
     expect(onres.app).toMatch(/^[a-z0-9][a-z0-9-]*$/);
     expect(onres.app).not.toBe("tool");
-    // The first build was filed as agent-work on the new app.
+    // The first build was filed as agent-work on the new app — and BORN at
+    // phase `queued` (the label is the verb; phase is the process truth).
     const filed = (await (
       await getHtml(`/api/v1/repos/ada/${onres.app}/issues/${onres.issue}`, ada)
     ).json()) as { labels: string };
     expect(filed.labels.split(",")).toContain("agent-work");
+    const filedWork = (await (
+      await getHtml(`/api/v1/repos/ada/${onres.app}/work/${onres.issue}`, ada)
+    ).json()) as { phase: string };
+    expect(filedWork.phase).toBe("queued");
+
+    // Legacy issue URLs redirect to the one work surface.
+    const rd = await fetch(
+      api + `/apps/ada/${onres.app}/issues/${onres.issue}`,
+      {
+        tls: { ca },
+        redirect: "manual",
+        headers: { authorization: `Basic ${btoa(ada)}` },
+      },
+    );
+    expect(rd.status).toBe(303);
+    expect(rd.headers.get("location")).toBe(
+      `/apps/ada/${onres.app}/work/${onres.issue}`,
+    );
   }, 120_000);
 });

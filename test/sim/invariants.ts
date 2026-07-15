@@ -24,6 +24,13 @@
 //   6. fleet sovereignty     — a mother's key opens NOTHING in any daughter
 //                              (HEAD and full history), and lineage grows by
 //                              exactly one per generation.
+//   7. work-item coherence   — every item sits in exactly one legal phase; the
+//                              derived open/closed state matches it; shipped ⇒
+//                              change merged, closed-with-change ⇒ change
+//                              closed; attempt numbers are strictly monotone.
+//   8. preview coupling      — a live preview container implies its work
+//                              item's change is still open (the reconciler
+//                              tears previews down when the change resolves).
 
 import { readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -451,6 +458,113 @@ export async function fleetSovereignty(
   return v;
 }
 
+// ── 7. work-item coherence ───────────────────────────────────────────────
+
+const WORK_PHASE_SET = new Set([
+  "intent",
+  "queued",
+  "building",
+  "reviewing",
+  "reworking",
+  "shipped",
+  "parked",
+  "closed",
+]);
+
+/**
+ * The unified work-item model, checked from state alone: every item has
+ * exactly one known phase; the legacy `state` column always equals the phase
+ * derivation (closed ⇔ shipped|closed — guards the compat mirror); `shipped`
+ * items carry a merged change and `closed` items with a change carry a closed
+ * one; an open change always names both refs; attempts are an append-only
+ * ledger numbered 1..n. (Edge legality itself is enforced at the single write
+ * site, store.setWorkPhase — a snapshot cannot observe transitions.)
+ */
+export function workItemCoherence(platform: Platform): Violation[] {
+  const v: Violation[] = [];
+  const flag = (key: string, detail: string): void => {
+    v.push({ invariant: "work-item-coherence", detail: `${key}: ${detail}` });
+  };
+  for (const r of platform.store.listRepos()) {
+    for (const i of platform.store.listIssues(r.owner, r.name)) {
+      const key = `${i.owner}/${i.repo}#${i.number}`;
+      if (!WORK_PHASE_SET.has(i.phase)) {
+        flag(key, `unknown phase '${i.phase}'`);
+        continue;
+      }
+      const derived =
+        i.phase === "shipped" || i.phase === "closed" ? "closed" : "open";
+      if (i.state !== derived)
+        flag(
+          key,
+          `state '${i.state}' != derivation '${derived}' of phase '${i.phase}'`,
+        );
+      if (i.phase === "shipped" && i.change_state !== "merged")
+        flag(key, `shipped but change_state is '${i.change_state}'`);
+      if (i.phase === "closed" && i.head_ref && i.change_state !== "closed")
+        flag(
+          key,
+          `closed with a change but change_state is '${i.change_state}'`,
+        );
+      if (
+        (i.phase === "reviewing" || i.phase === "reworking") &&
+        i.change_state !== "open"
+      )
+        flag(key, `${i.phase} but change_state is '${i.change_state}'`);
+      if (i.change_state === "open" && (!i.head_ref || !i.base_ref))
+        flag(key, `open change missing head/base ref`);
+      platform.store.listAttempts(i.owner, i.repo, i.number).forEach((a, x) => {
+        if (a.attempt !== x + 1)
+          flag(key, `attempt ledger not 1..n (saw ${a.attempt} at index ${x})`);
+      });
+    }
+  }
+  return v;
+}
+
+// ── 8. preview coupling ──────────────────────────────────────────────────
+
+/**
+ * A live preview container implies its work item's change is still open.
+ * Teardown is the reconciler's async job, so a just-resolved change gets a
+ * settle window before it counts. (The ⇐ direction — open change ⇒ preview
+ * serving — is build-latency-bound and proven by the preview e2e, not sampled
+ * between batches.)
+ */
+export async function previewCoupling(
+  platform: Platform,
+): Promise<Violation[]> {
+  const scan = async (): Promise<Violation[]> => {
+    const list = await platform.engine.listPlatformContainers(
+      platform.platformId,
+    );
+    if (list.status !== "ok") return [];
+    const v: Violation[] = [];
+    for (const c of list.value) {
+      if (!c.preview) continue;
+      const n = Number(c.preview.replace(/^pr-/, ""));
+      const item = Number.isInteger(n)
+        ? platform.store.getIssue(c.owner, c.app, n)
+        : null;
+      if (!item || item.change_state !== "open")
+        v.push({
+          invariant: "preview-coupling",
+          detail: `preview ${c.preview} of ${c.owner}/${c.app} is live but ${
+            item ? `its change is '${item.change_state}'` : "no such work item"
+          }`,
+        });
+    }
+    return v;
+  };
+  let v = await scan();
+  const t0 = performance.now();
+  while (v.length && performance.now() - t0 < 20_000) {
+    await Bun.sleep(2_000);
+    v = await scan();
+  }
+  return v;
+}
+
 // ── orchestration ────────────────────────────────────────────────────────
 
 /** Run every cheap, single-platform invariant against current state and return
@@ -473,5 +587,7 @@ export async function checkAll(
     ...(await credentialCanaries(platform, pats)),
     ...deployStateMachine(platform, apps),
     ...(await containerCoherence(platform, apps)),
+    ...workItemCoherence(platform),
+    ...(await previewCoupling(platform)),
   ];
 }

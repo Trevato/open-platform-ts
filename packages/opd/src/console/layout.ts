@@ -31,7 +31,14 @@ export interface Crumb {
 export interface Chrome {
   domain: string;
   user: string;
-  active: "apps" | "orgs" | "lineage" | "crew" | "platform" | "";
+  active:
+    | "apps"
+    | "orgs"
+    | "integrations"
+    | "lineage"
+    | "crew"
+    | "platform"
+    | "";
   /** Breadcrumb trail below the header; last entry is the current page. */
   crumbs?: Crumb[];
 }
@@ -68,7 +75,7 @@ function crewTick(){var el=document.getElementById('crewpill');if(!el||document.
   fetch('/api/v1/crew').then(function(r){return r.ok?r.json():null}).then(function(d){if(!d)return;
     el.className='crew'+(d.blocked?' blocked':(d.working?' working':''));
     var dot=d.blocked?'error':(d.working?'building':'');
-    var txt=d.blocked?(d.blocked+' need'+(d.blocked>1?'':'s')+' review'):(d.working?(d.working+' agent'+(d.working>1?'s':'')+' working'):'crew idle');
+    var txt=d.blocked?(d.blocked+' parked — need'+(d.blocked>1?'':'s')+' you'):(d.working?(d.working+' agent'+(d.working>1?'s':'')+' working'):'crew idle');
     el.innerHTML='<span class="dot '+dot+'"></span>'+txt;
   }).catch(function(){});}
 document.addEventListener('DOMContentLoaded',function(){var c=document.getElementById('tmc');if(c)setTheme(document.documentElement.dataset.theme||'dark');crewTick();setInterval(crewTick,3000);});
@@ -107,7 +114,7 @@ export function page(
   <div class="bar">
     <a class="brand" href="/"><span class="seed"></span>Open Platform <span class="dom">${esc(chrome.domain)}</span></a>
     <span class="spacer"></span>
-    <nav>${nav("/", "Apps", "apps")}${nav("/orgs", "Orgs", "orgs")}${nav("/platform", "Platform", "platform")}${nav("/crew", "Crew", "crew")}${nav("/lineage", "Lineage", "lineage")}</nav>
+    <nav>${nav("/", "Apps", "apps")}${nav("/orgs", "Orgs", "orgs")}${nav("/integrations", "Integrations", "integrations")}${nav("/platform", "Platform", "platform")}${nav("/crew", "Crew", "crew")}${nav("/lineage", "Lineage", "lineage")}</nav>
     <a class="crew" id="crewpill" href="/crew"><span class="dot"></span>crew idle</a>
     <span class="tmc" id="tmc" role="group" aria-label="Theme">${themeBtn("light", "☀", "Light")}${themeBtn("dim", "◑", "Dim")}${themeBtn("dark", "☾", "Dark")}</span>
     <span class="who">${esc(chrome.user)}</span>
