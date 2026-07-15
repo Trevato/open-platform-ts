@@ -54,6 +54,30 @@ inlined everything) with three themes, breadcrumbs everywhere, a live crew-statu
 pill, and an ai-elements-style activity feed that renders each agent's tool calls,
 narration, and verdict as it works. Responsive from phone to ultrawide.
 
+## Apps declare what they need — `op.json`
+
+Beside its Dockerfile, an app may carry an `op.json` manifest: memory/cpu,
+raw TCP ports (a Minecraft server's 25565 gets a sticky public port relayed
+by the gate), assets the platform fetches into `/data` before start
+(sha256-pinned, host-allowlisted), and `provides`/`consumes` peer
+declarations. Peers wire by derivation — `OP_PEER_<APP>_URL` env plus
+`peerFetch` in the template, with app-to-app tokens whose audience dies at
+the gate (`x-plat-user: app:owner/app` upstream). The platform derives an
+**integration map** from repo heads (`/api/v1/integration-map`, console →
+Integrations); nothing is registered, so nothing goes stale. Everything is
+bounded by operator policy in `plat/platform`'s `platform.json` and admitted
+fail-closed.
+
+## Work items — the development process
+
+Issues and pull requests collapsed into one unit: a **work item** is intent +
+at most one change + an append-only attempts ledger. One lifecycle (intent →
+queued → building → reviewing ⇄ reworking → shipped | parked), enforced as a
+legal-edge phase machine in the store — an illegal transition never happened.
+The crew's rework survives restarts, reviewers remember prior verdicts, and a
+human-pushed branch enters the same adversarial review machinery as crew code.
+`docs/design/04-work-items.md` holds the full design.
+
 ## Substrate
 
 `bun` + `git` + a Docker-Engine-API socket. Nothing else. (The build crew also

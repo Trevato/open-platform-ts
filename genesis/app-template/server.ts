@@ -1,11 +1,26 @@
-// Open Platform app template: zero npm dependencies, one file, real data, and
-// "Sign in with your platform" (OIDC + PKCE) — all on Bun built-ins.
+// Open Platform app template: zero npm dependencies, real data, "Sign in with
+// your platform" (OIDC + PKCE), and app-to-app calls (peerFetch) — all on Bun
+// built-ins. The UI lives in ./ui.ts: the platform console's design language
+// as a handful of template-literal helpers. Declare extra needs (memory, raw
+// TCP ports, assets, peers) in op.json at the repo root — see README.md.
 //
 // The platform injects: DATA_DIR, PORT, and (when signed in is wanted)
 // OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_REDIRECT_URI,
 // OP_CA_FILE (trust the platform's own HTTPS), APP_SECRET (sign our session).
+// op.json adds OP_PEER_<APP>_URL per consumed peer and OP_TCP_PORT_<port>
+// per public TCP port.
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
+import {
+  button,
+  card,
+  esc,
+  html,
+  layout,
+  pageHeader,
+  pill,
+  stat,
+} from "./ui.ts";
 
 const dataDir = process.env.DATA_DIR ?? "/data";
 const db = new Database(join(dataDir, "app.db"), { create: true });
@@ -22,7 +37,7 @@ const REDIRECT_URI = process.env.OIDC_REDIRECT_URI;
 const APP_SECRET = process.env.APP_SECRET ?? "dev-secret";
 const oidcEnabled = !!(ISSUER && CLIENT_ID && CLIENT_SECRET && REDIRECT_URI);
 
-// Trust the platform CA for the server-to-server token/userinfo calls.
+// Trust the platform CA for the server-to-server token/userinfo/peer calls.
 let caText: string | undefined;
 if (process.env.OP_CA_FILE) {
   try {
@@ -58,9 +73,9 @@ async function makeSession(username: string) {
 }
 async function readSession(req: Request): Promise<string | null> {
   const cookie = req.headers.get("cookie") ?? "";
-  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
+  const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/)?.[1];
   if (!m) return null;
-  const [user, sig] = decodeURIComponent(m[1]).split(".");
+  const [user, sig] = decodeURIComponent(m).split(".");
   if (!user || !sig) return null;
   return (await hmac(APP_SECRET, user)) === sig ? user : null;
 }
@@ -70,6 +85,76 @@ const pending = new Map<string, string>();
 
 function cookie(name: string, value: string, maxAge: number) {
   return `${name}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+// ── app-to-app calls ─────────────────────────────────────────────────────────
+// Declare peers in op.json `consumes` and the platform injects
+// OP_PEER_<APP>_URL. peerFetch mints a client_credentials token from this
+// app's own OIDC client, audience-bound to that one peer (RFC 8707 resource):
+// the peer sees a verified `x-plat-user: app:<owner>/<app>` header, and the
+// token is useless anywhere else.
+const peerTokens = new Map<string, { token: string; refreshAt: number }>();
+
+async function peerToken(origin: string): Promise<string> {
+  const cached = peerTokens.get(origin);
+  if (cached && Date.now() < cached.refreshAt) return cached.token;
+  const res = await fetch(`${ISSUER}/oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: CLIENT_ID!,
+      client_secret: CLIENT_SECRET!,
+      resource: origin,
+    }),
+    ...(tls ? { tls } : {}),
+  });
+  if (!res.ok)
+    throw new Error(
+      `token mint for ${origin} failed: ${res.status} ${await res.text()}`,
+    );
+  const { access_token, expires_in } = (await res.json()) as {
+    access_token: string;
+    expires_in: number;
+  };
+  peerTokens.set(origin, {
+    token: access_token,
+    refreshAt: Date.now() + (expires_in - 30) * 1000,
+  });
+  return access_token;
+}
+
+/** Call a peer app declared in op.json `consumes`. `name` is the peer's app
+ *  name ("shop" reads OP_PEER_SHOP_URL). Absent or down peers answer 404/502
+ *  — that's normal; handle it. */
+export async function peerFetch(
+  name: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const envName = `OP_PEER_${name.toUpperCase().replaceAll("-", "_")}_URL`;
+  const base = process.env[envName];
+  if (!base)
+    throw new Error(
+      `${envName} is not set — add {"app":"${name}"} to "consumes" in op.json`,
+    );
+  if (!ISSUER || !CLIENT_ID || !CLIENT_SECRET)
+    throw new Error(
+      "peerFetch needs OIDC_ISSUER/OIDC_CLIENT_ID/OIDC_CLIENT_SECRET (platform-injected)",
+    );
+  const origin = new URL(base).origin;
+  const call = async () => {
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${await peerToken(origin)}`);
+    return fetch(origin + path, { ...init, headers, ...(tls ? { tls } : {}) });
+  };
+  let res = await call();
+  if (res.status === 401) {
+    // Token went stale mid-lifetime (rotation, redeploy): mint fresh, retry once.
+    peerTokens.delete(origin);
+    res = await call();
+  }
+  return res;
 }
 
 Bun.serve({
@@ -169,23 +254,56 @@ Bun.serve({
       });
     }
 
-    const auth = !oidcEnabled
-      ? `<p class="muted">OIDC not configured for this app.</p>`
+    const app = process.env.OP_APP ?? "app";
+    const owner = process.env.OP_OWNER;
+    const authCard = !oidcEnabled
+      ? card(`<p class="mut m0">OIDC is not configured for this app.</p>`, {
+          title: "Sign in",
+          desc: "The platform injects OIDC_* env when it provisions your OAuth client.",
+        })
       : signedIn
-        ? `<p>Signed in as <b>${signedIn}</b> — via your platform. <a href="/logout">Sign out</a></p>`
-        : `<p><a class="btn" href="/login">Sign in with your platform</a></p>`;
-    return new Response(
-      `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>${process.env.OP_APP ?? "app"}</title>
-<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:34rem;margin:14vh auto;padding:0 1.4rem;
-background:#0b0d0e;color:#e6edef}h1{font-weight:640}.muted{color:#8b9599}b{color:#3fb950}
-.btn{display:inline-block;background:#2ea043;color:#04140a;padding:.6rem 1rem;border-radius:8px;font-weight:600;text-decoration:none}
-code{font-family:ui-monospace,monospace;color:#8b9599}</style>
-<h1>${process.env.OP_APP ?? "app"}</h1>
-${auth}
-<p class="muted">Served from your own data directory · <code>${visits.n}</code> visits.</p>`,
-      { headers: { "content-type": "text/html; charset=utf-8" } },
-    );
+        ? card(
+            `<p class="m0">Signed in as <b>${esc(signedIn)}</b> — verified by your platform; no password ever touches this app.</p>`,
+            {
+              title: "Sign in",
+              footer: button("Sign out", {
+                href: "/logout",
+                variant: "ghost",
+                small: true,
+              }),
+            },
+          )
+        : card(
+            `<p class="mut m0">One click — your platform is the identity provider.</p>`,
+            {
+              title: "Sign in",
+              footer: button("Sign in with your platform", { href: "/login" }),
+            },
+          );
+    const body =
+      pageHeader({
+        title: app,
+        sub: owner
+          ? `${owner}'s app — fresh from the template`
+          : "fresh from the template",
+        // The gate verifies callers at the edge: humans as "alice",
+        // peer apps as "app:<owner>/<app>". Anonymous is a real state too.
+        actions: platformUser ? pill(platformUser, "ok") : pill("anonymous"),
+      }) +
+      `<div class="grid">` +
+      stat({
+        label: "Visits",
+        value: visits.n,
+        hint: "counted in /data/app.db",
+      }) +
+      stat({
+        label: "Signed in",
+        value: signedIn ?? "—",
+        hint: signedIn ? "HMAC-signed session cookie" : "no session yet",
+      }) +
+      `</div>` +
+      `<div class="mt">${authCard}</div>`;
+    return html(layout({ title: app, user: signedIn, body }));
   },
 });
 

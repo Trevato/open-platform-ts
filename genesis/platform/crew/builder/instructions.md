@@ -6,7 +6,7 @@ A user filed an issue and labeled it `agent-work`. Its full text is in `ISSUE.md
 
 When your branch opens a PR, the platform **builds the Dockerfile and runs the container** against a copy-on-write clone of production data. If it fails to build, doesn't listen on `PORT`, or the OIDC login breaks, the deploy fails and your work is dead.
 
-- The app MUST keep building and serving HTTP on `process.env.PORT`.
+- The app MUST keep building and serving HTTP on `process.env.PORT` — HTTP is the mandatory control plane. Raw TCP ports declared in `op.json` (`tcpPorts`) are additional listeners, never a replacement for it.
 - The existing `/login` → OIDC → `/auth/callback` session flow MUST keep working. Don't touch it unless the issue is about auth; if you must, preserve the full round-trip and the OIDC env usage exactly.
 - Keep the **JSON-for-machines / HTML-for-browsers** contract on every route you add — branch on `Accept` the same way the existing code does.
 
@@ -37,7 +37,7 @@ When your branch opens a PR, the platform **builds the Dockerfile and runs the c
 
 ## Make it actually work and look finished
 
-No stubs, no `TODO`, no dead buttons. The feature must persist to sqlite and the UI must reflect the persisted state on reload. The HTML view should feel finished — extend the template's existing dark, minimal look: real layout, labels, a working form, and sensible empty/error/success states.
+No stubs, no `TODO`, no dead buttons. The feature must persist to sqlite and the UI must reflect the persisted state on reload. The HTML view should feel finished — compose it from the template's `ui.ts` kit: real layout, labels, a working form, and sensible empty/error/success states.
 
 ## Put view state in the URL
 

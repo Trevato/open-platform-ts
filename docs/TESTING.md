@@ -3,13 +3,34 @@
 The living doc for the July 2026 push. Read this to get current, then follow
 any recipe to see a feature working. Updated after every milestone.
 
-**Status (2026-07-13):** Sonnet 5 is the crew default and **proven live** — it
-built three office apps (task tracker, expense log, contact list) from
-plain-English descriptions and shipped all three to production; the reviewer
-caught a real access-control bug and auto-reworked it. Orgs, GitHub import,
-app-level migration, issue dependencies, the shadcn design refresh, and the
-simulation harness have shipped. **New: the on-ramp** — describe a workflow in
-plain words and get a working tool, built for a non-technical user.
+**Status (2026-07-14):** the capability release. Apps now declare what they
+NEED in `op.json` beside their Dockerfile — memory/cpus, raw TCP ports (a
+Minecraft server's 25565), assets the platform fetches into `/data` before
+start (sha256-pinned, allowlisted hosts), and `provides`/`consumes` peer
+declarations. The platform derives an **integration map** from repo heads
+(`/api/v1/integration-map` + the console's Integrations page), wires peers by
+injection (`OP_PEER_<APP>_URL` + `peerFetch` in the template with
+client_credentials tokens that die at the gate as `x-plat-user: app:o/a`),
+and relays public TCP through the gate on sticky ports. The app template now
+ships a real UI kit (`ui.ts`, the console's design language). Issues and PRs
+collapsed into **work items** — one lifecycle (intent → queued → building →
+reviewing ⇄ reworking → shipped | parked), a legal-edge phase machine in the
+store, a persisted attempts ledger (restart-safe rework, reviewer memory),
+cross-repo deps, and human branches entering the same review machinery. The
+crew skills channel is live (plat/platform `crew/<role>/skills/*.md` reach
+prompts, hot-reloadable). Designs: `docs/design/04-work-items.md`,
+`docs/design/05-manifest-integration.md`.
+
+### Feel the capability release in one test
+
+```sh
+bun test test/capabilities.e2e.test.ts
+```
+
+~20s against real Docker: pushes an app whose `op.json` asks for 700 MB and a
+raw TCP port → the container really gets the memory, the public port relays
+bytes, an out-of-policy manifest fails closed while the old container keeps
+serving, and the port survives redeploys (players keep their address).
 
 ### Try the on-ramp (the fastest way to feel it)
 
@@ -32,19 +53,26 @@ on-ramp→crew→ship loop on Sonnet 5 is `test/crew-live.e2e.test.ts` (gated be
 
 ## Milestones
 
-| #   | Milestone                                                      | State      | Proof                                                  |
-| --- | -------------------------------------------------------------- | ---------- | ------------------------------------------------------ |
-| 1   | Crew led by Sonnet 5 (`crew.model` config, hot-reload)         | ✅         | `bun test packages/opd/test/platform-config.test.ts`   |
-| —   | Fix: seed carries `plat/platform` (crew was dead on daughters) | ✅         | `bun run test:m1` (asserts crew loads on the daughter) |
-| 2   | Orgs — shared namespaces owning repos/apps                     | ✅         | `bun test packages/forge/test/orgs.test.ts`            |
-| 3   | GitHub import — drop a URL, crew tunes & deploys               | ✅ built\* | `bun test packages/git/test/githost.test.ts`           |
-| 4   | App migration — export an app, a client platform ingests it    | ✅         | `bun test test/migration.e2e.test.ts`                  |
-| 5   | Console design refresh (shadcn language, still dep-free)       | ✅         | `bun test test/console.e2e.test.ts`                    |
-| 6   | Issue dependencies + flow (blocked-by, cycle-safe, DAG)        | ✅         | `bun test packages/forge/test/issue-deps.test.ts`      |
-| 7   | Simulation harness — swarm platforms with personas             | ✅         | `bun test test/sim/sim.test.ts`                        |
-| 8   | Demo: business org → built software → sold via migration       | ✅         | `docs/DEMO.md` (+ migration & console e2e)             |
-| 9   | Live proof: Sonnet 5 builds & ships 3 office apps in tandem    | ✅         | `test/crew-live.e2e.test.ts` (`OP_CREW_LIVE=1`+token)  |
-| 10  | On-ramp: describe a workflow → working tool (for non-coders)   | ✅         | `bun test test/console.e2e.test.ts` (+ crew-live)      |
+| #   | Milestone                                                      | State      | Proof                                                    |
+| --- | -------------------------------------------------------------- | ---------- | -------------------------------------------------------- |
+| 1   | Crew led by Sonnet 5 (`crew.model` config, hot-reload)         | ✅         | `bun test packages/opd/test/platform-config.test.ts`     |
+| —   | Fix: seed carries `plat/platform` (crew was dead on daughters) | ✅         | `bun run test:m1` (asserts crew loads on the daughter)   |
+| 2   | Orgs — shared namespaces owning repos/apps                     | ✅         | `bun test packages/forge/test/orgs.test.ts`              |
+| 3   | GitHub import — drop a URL, crew tunes & deploys               | ✅ built\* | `bun test packages/git/test/githost.test.ts`             |
+| 4   | App migration — export an app, a client platform ingests it    | ✅         | `bun test test/migration.e2e.test.ts`                    |
+| 5   | Console design refresh (shadcn language, still dep-free)       | ✅         | `bun test test/console.e2e.test.ts`                      |
+| 6   | Issue dependencies + flow (blocked-by, cycle-safe, DAG)        | ✅         | `bun test packages/forge/test/issue-deps.test.ts`        |
+| 7   | Simulation harness — swarm platforms with personas             | ✅         | `bun test test/sim/sim.test.ts`                          |
+| 8   | Demo: business org → built software → sold via migration       | ✅         | `docs/DEMO.md` (+ migration & console e2e)               |
+| 9   | Live proof: Sonnet 5 builds & ships 3 office apps in tandem    | ✅         | `test/crew-live.e2e.test.ts` (`OP_CREW_LIVE=1`+token)    |
+| 10  | On-ramp: describe a workflow → working tool (for non-coders)   | ✅         | `bun test test/console.e2e.test.ts` (+ crew-live)        |
+| 11  | `op.json` manifests: resources, TCP ports, assets, peers       | ✅         | `bun test packages/opd/test/manifest.test.ts`            |
+| 12  | Raw TCP ingress (TcpGate relay, sticky public ports)           | ✅         | `bun test test/capabilities.e2e.test.ts`                 |
+| 13  | Platform-fetched assets (cache, sha256 pin, allowlist)         | ✅         | `bun test packages/opd/test/assets.test.ts`              |
+| 14  | App-to-app auth (client_credentials, aud dies at the gate)     | ✅         | `bun test packages/opd/test/oidc.test.ts` (+ e2e)        |
+| 15  | Derived integration map (API + console Integrations page)      | ✅         | `GET /api/v1/integration-map` on any platform            |
+| 16  | Template UI kit (`ui.ts`) + `peerFetch` in the genome          | ✅         | `genesis/app-template/` (+ README contract)              |
+| 17  | Work items: one lifecycle, attempts ledger, cross-repo deps    | ✅         | `bun test packages/store packages/opd/test/crew.test.ts` |
 
 \* Import backend, console control, and the `importer` crew role are built and
 the clone path is tested. The full crew-tuning loop needs `CLAUDE_CODE_OAUTH_TOKEN`
