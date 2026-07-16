@@ -422,6 +422,43 @@ export class Engine {
     return Result.ok(true);
   }
 
+  /** Remove images tagged `<prefix>:*` except `keep`, so an app's old build
+   *  shas don't pile up after every deploy. Best-effort and safe: an image
+   *  still used by a running container (e.g. a live preview) gets a 409 from
+   *  the engine and is skipped, never force-removed. Returns how many went. */
+  async pruneImages(
+    prefix: string,
+    keep: string[],
+  ): Promise<Result<number, EngineError>> {
+    const op = "pruneImages";
+    const filters = JSON.stringify({ reference: [`${prefix}:*`] });
+    const res = await this.request(
+      op,
+      `${API}/images/json?filters=${encodeURIComponent(filters)}`,
+    );
+    if (res.isErr()) return Result.err(res.error);
+    if (!res.value.ok) return this.httpError(op, res.value);
+    const list = (await res.value.json()) as Array<{
+      RepoTags: string[] | null;
+    }>;
+    const keepSet = new Set(keep);
+    let removed = 0;
+    for (const img of list) {
+      for (const tag of img.RepoTags ?? []) {
+        if (!tag.startsWith(`${prefix}:`) || keepSet.has(tag)) continue;
+        const del = await this.request(
+          op,
+          `${API}/images/${encodeURIComponent(tag)}`,
+          { method: "DELETE" },
+        );
+        if (del.isErr()) continue;
+        if (del.value.ok) removed++;
+        await del.value.text(); // drain (200 removed, or 409 in-use → skipped)
+      }
+    }
+    return Result.ok(removed);
+  }
+
   /** Create a bridge network if absent. `internal: true` blocks all egress
    *  from the network (used to force agent traffic through a proxy). */
   async ensureNetwork(

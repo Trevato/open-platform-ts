@@ -501,6 +501,23 @@ export class Reconciler {
         tag: v.tag,
         preview: v.preview,
       });
+
+      // Reap this app's superseded build images so they don't accumulate one
+      // per deploy. Prod keeps the tag it just shipped; the engine skips any
+      // image still used by a running container (e.g. a live preview), so a
+      // prod converge never pulls an image out from under an open preview.
+      if (isProd) {
+        const pruned = await engine.pruneImages(
+          `op/${spec.owner}-${spec.app}`,
+          [v.tag],
+        );
+        if (pruned.status === "ok" && pruned.value > 0)
+          log.info("pruned old images", {
+            owner: spec.owner,
+            app: spec.app,
+            removed: pruned.value,
+          });
+      }
     } finally {
       await rm(work, { recursive: true, force: true });
     }

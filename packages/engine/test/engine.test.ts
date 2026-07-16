@@ -293,6 +293,63 @@ describe("engine (docker)", () => {
     60_000,
   );
 
+  dtest(
+    "pruneImages: keeps the current tag, reaps old shas, skips in-use",
+    async () => {
+      const prefix = `op/optest-prune-${randomHex(3)}`;
+      // Real deploys build a DISTINCT image per commit — model that so the
+      // in-use protection (last tag of a running image → 409) is exercised.
+      const del = (t: string) =>
+        raw(`/v1.44/images/${encodeURIComponent(t)}?force=true`, {
+          method: "DELETE",
+        }).then((r) => r.text());
+      const buildDistinct = async (t: string, marker: string) => {
+        const ctx = mkdtempSync(join(tmpdir(), "op-prune-"));
+        await writeFile(
+          join(ctx, "Dockerfile"),
+          `FROM busybox:latest\nRUN echo ${marker} > /marker\nCMD ["sh","-c","echo started; while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok' | nc -l -p 8080; done"]\n`,
+        );
+        Result.unwrap(await engine.buildImage({ contextDir: ctx, tag: t }));
+        await rm(ctx, { recursive: true, force: true });
+      };
+      await buildDistinct(`${prefix}:old`, "a");
+      await buildDistinct(`${prefix}:keep`, "b");
+      await buildDistinct(`${prefix}:inuse`, "c");
+
+      // A container holds :inuse, so its image can't be removed.
+      const run = Result.unwrap(
+        await engine.runApp({
+          image: `${prefix}:inuse`,
+          owner: "p",
+          app: "prune",
+          platformId,
+          env: {},
+          containerPort: 8080,
+        }),
+      ).containerId;
+
+      const removed = Result.unwrap(
+        await engine.pruneImages(prefix, [`${prefix}:keep`]),
+      );
+      // :old goes; :keep is kept by name; :inuse is protected (running) → 409.
+      expect(removed).toBe(1);
+      expect(Result.unwrap(await engine.imageExists(`${prefix}:old`))).toBe(
+        false,
+      );
+      expect(Result.unwrap(await engine.imageExists(`${prefix}:keep`))).toBe(
+        true,
+      );
+      expect(Result.unwrap(await engine.imageExists(`${prefix}:inuse`))).toBe(
+        true,
+      );
+
+      await engine.stopAndRemove(run);
+      await del(`${prefix}:keep`);
+      await del(`${prefix}:inuse`);
+    },
+    180_000,
+  );
+
   dtest("runTask surfaces a nonzero exit code", async () => {
     const res = Result.unwrap(
       await engine.runTask({
