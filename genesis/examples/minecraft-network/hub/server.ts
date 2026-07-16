@@ -449,7 +449,19 @@ setInterval(function () {
 </script></body></html>`;
 }
 
-if (raw("desired") === "running") void startProxy();
+// Resume on boot, retrying while the backends come up after a platform
+// restart (startProxy needs at least one discovered backend).
+async function resumeOnBoot(): Promise<void> {
+  if (raw("desired") !== "running") return;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if (proc) return;
+    const started = await startProxy();
+    if (started.ok) return;
+    console.log(`[hub] start deferred (${started.error}); retrying in 10s`);
+    await Bun.sleep(10_000);
+  }
+}
+void resumeOnBoot();
 console.log(
   `[hub] ${APP} control plane on :${PORT}; fronting ${backends.length} backend(s); public ${JOIN_ADDRESS}`,
 );

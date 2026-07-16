@@ -620,7 +620,20 @@ setInterval(function () {
 </script></body></html>`;
 }
 
-if (raw("desired") === "running" && eulaAccepted()) void startServer();
+// Resume on boot. A backend can lose a start race with the hub after a
+// platform restart (the hub isn't serving the secret yet) — so retry on a
+// backoff instead of giving up, until the world is running.
+async function resumeOnBoot(): Promise<void> {
+  if (raw("desired") !== "running" || !eulaAccepted()) return;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if (proc) return;
+    const started = await startServer();
+    if (started.ok) return;
+    console.log(`[wrapper] start deferred (${started.error}); retrying in 10s`);
+    await Bun.sleep(10_000);
+  }
+}
+void resumeOnBoot();
 console.log(
   `[wrapper] ${APP} control plane on :${PORT} (${setting("role")}); ${DIRECT_ADDRESS || "no public port"}`,
 );
