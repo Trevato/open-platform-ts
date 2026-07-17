@@ -255,4 +255,10 @@ export const MIGRATIONS: readonly string[] = [
   INSERT OR IGNORE INTO work_deps (owner, repo, number, on_owner, on_repo, on_number, created_at)
     SELECT owner, repo, number, owner, repo, blocked_by, created_at FROM issue_deps;
   `,
+  `
+  -- hosts.container_port always stored the HOST loopback port the container
+  -- published (it is what the gate dials on 127.0.0.1) — name it what it is,
+  -- matching app_ports.host_port.
+  ALTER TABLE hosts RENAME COLUMN container_port TO host_port;
+  `,
 ];

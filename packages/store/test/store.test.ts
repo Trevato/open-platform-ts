@@ -15,7 +15,11 @@ function freshStore(): Store {
 
 // The work-items migration (the last entry) is the one that backfills
 // legacy issues → phases. Everything before it is the pre-work-item schema.
-const WORK_MIGRATION = MIGRATIONS.length - 1;
+// The work-item backfill migration, found by content — appending later
+// migrations must not silently retarget this test.
+const WORK_MIGRATION = MIGRATIONS.findIndex((m) =>
+  m.includes("ALTER TABLE issues ADD COLUMN phase"),
+);
 
 afterEach(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -90,7 +94,7 @@ describe("Store", () => {
     s.setHost("hello-ada.plat.localtest.me", "ada", "hello", "c2", 3001);
     const row = s.resolveHost("hello-ada.plat.localtest.me");
     expect(row?.container_id).toBe("c2");
-    expect(row?.container_port).toBe(3001);
+    expect(row?.host_port).toBe(3001);
     s.deleteHostsFor("ada", "hello");
     expect(s.resolveHost("hello-ada.plat.localtest.me")).toBeNull();
     s.close();

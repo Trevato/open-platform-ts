@@ -9,6 +9,8 @@ import type { AppPolicy } from "../manifest.ts";
 import { isSelfRepo, OPD, PLAT } from "../platform-config.ts";
 import { authorizeFor } from "../oidc.ts";
 import { hostFor } from "../policy.ts";
+import { BLOB_JS, blobView } from "./blob.ts";
+import { DocsSource, docsRoute } from "./docs.ts";
 import { type Chrome, type Crumb, esc, html, page } from "./layout.ts";
 import { STYLE } from "./style.ts";
 
@@ -19,6 +21,10 @@ export interface ConsoleDeps {
   sd: StateDir;
   domain: string;
   appPolicy: () => AppPolicy;
+  /** Shared with the API and the guide — cached on plat/platform's main sha. */
+  docs: DocsSource;
+  /** False without a Claude credential — the chrome hides the Ask button. */
+  guideEnabled: boolean;
 }
 
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
@@ -183,6 +189,19 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
       );
     }
 
+    // Docs are the one PUBLIC console surface: product docs carry no secrets,
+    // and a shared /docs link must not bounce through login. The chrome still
+    // reflects a session when one exists.
+    if (path === "/docs" || path.startsWith("/docs/")) {
+      const reader = await deps.forge.authenticate(req);
+      return docsRoute(req, path, {
+        docs: deps.docs,
+        domain: deps.domain,
+        user: reader?.username ?? null,
+        guide: deps.guideEnabled && reader !== null,
+      });
+    }
+
     // Everything below is the authenticated console. Non-console paths return
     // null so the forge/API routers get their turn.
     const isConsolePath =
@@ -202,6 +221,7 @@ ${error ? `<p class="err">${esc(error)}</p>` : ""}
       domain: deps.domain,
       user: user.username,
       active,
+      guide: deps.guideEnabled,
       ...(crumbs ? { crumbs } : {}),
     });
 
@@ -586,6 +606,43 @@ ${
         "",
         { wide: true },
       );
+    }
+
+    // ── source viewer ───────────────────────────────────────────────────
+    // /apps/:owner/:app/blob/:ref/<path> — any readable repo file with line
+    // anchors (#L42, #L42-60). Docs code references land here.
+    const bm = path.match(/^\/apps\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/);
+    if (bm) {
+      const [, owner, app, ref, filePath] = bm as unknown as [
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      const back: Crumb[] = [
+        { label: "Apps", href: "/" },
+        { label: app, href: `/apps/${owner}/${app}` },
+        { label: filePath.split("/").pop() ?? filePath },
+      ];
+      if (!deps.forge.authorize(user, owner, app, "read"))
+        return page("Not found", chrome("apps", back), notFound("/"));
+      const view = await blobView(
+        deps.git,
+        owner,
+        app,
+        decodeURIComponent(ref),
+        decodeURIComponent(filePath),
+      );
+      if (!view.body)
+        return page(
+          "Not found",
+          chrome("apps", back),
+          notFound(`/apps/${esc(owner)}/${esc(app)}`),
+        );
+      return page(view.title, chrome("apps", back), view.body, BLOB_JS, {
+        wide: true,
+      });
     }
 
     // ── app detail ──────────────────────────────────────────────────────

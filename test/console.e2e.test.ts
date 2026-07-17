@@ -194,4 +194,95 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
       `/apps/ada/${onres.app}/work/${onres.issue}`,
     );
   }, 120_000);
+
+  // ── the docs surface: public reading, machine mirrors, blob viewer, guide ─
+  test("serves the manual, its machine mirrors, and the source viewer", async () => {
+    await import("node:fs/promises").then((fs) =>
+      fs.mkdir(_h() + "/.op-e2e", { recursive: true }),
+    );
+    const base = await mkdtemp(join(_h(), ".op-e2e", "docs-"));
+    cleanup.push(() => rm(base, { recursive: true, force: true }));
+
+    const p = Result.unwrap(
+      await Platform.up({
+        root: join(base, "p"),
+        domain: "docs.localtest.me",
+        httpPort: 28097,
+        httpsPort: 28460,
+        custodyAck: true,
+      }),
+    );
+    cleanup.push(() => p.stop());
+    const api = "https://docs.localtest.me:28460";
+    const ca = p.caCertPem;
+    const admin = `plat:${p.freshAdminPassword}`;
+    const get = (path: string, auth?: string) =>
+      fetch(api + path, {
+        tls: { ca },
+        ...(auth
+          ? { headers: { authorization: `Basic ${btoa(auth)}` } }
+          : { redirect: "manual" as const }),
+      });
+
+    // Docs are PUBLIC: an anonymous reader gets the page, with sign-in chrome.
+    const anon = await get("/docs/quickstart");
+    expect(anon.status).toBe(200);
+    const anonHtml = await anon.text();
+    expect(anonHtml).toContain('class="docs"');
+    expect(anonHtml).toContain("Sign in");
+    expect(anonHtml).not.toContain('id="gopen"'); // no session, no Ask
+
+    // Signed in: the three-pane page with nav state, TOC, search palette.
+    const authed = await get("/docs/quickstart", admin);
+    const html = await authed.text();
+    expect(html).toContain('aria-current="page"');
+    expect(html).toContain("dtoc-list");
+    expect(html).toContain("dsearch-veil");
+    expect(html).toContain('href="/docs"'); // Docs lives in the header nav
+    // plat/opd is NOT hosted here, so code references render as plain code —
+    // never a dead link. (Shape, not a specific anchor: the truth checker
+    // owns anchors and corrects them as the source moves.)
+    expect(html).toMatch(/<code>packages\/[^<]+\.ts:\d+<\/code>/);
+    expect(html).not.toContain('class="code-ref"');
+
+    // Machine mirrors: raw page, llms index, search index.
+    const md = await get("/docs/quickstart.md");
+    expect(md.headers.get("content-type")).toContain("text/markdown");
+    expect(await md.text()).toContain("# Quickstart");
+    expect(await (await get("/docs/llms.txt")).text()).toContain(
+      "/docs/quickstart.md",
+    );
+    const idx = (await (await get("/docs/search.json")).json()) as {
+      pages: Array<{ slug: string }>;
+    };
+    expect(idx.pages.some((pg) => pg.slug === "quickstart")).toBe(true);
+
+    // The blob viewer renders any readable repo file with line anchors —
+    // plat/platform ships on every boot, so its docs manifest is a sure target.
+    const blob = await get(
+      "/apps/plat/platform/blob/main/docs/docs.json",
+      admin,
+    );
+    expect(blob.status).toBe(200);
+    const blobHtml = await blob.text();
+    expect(blobHtml).toContain('class="blob mono"');
+    expect(blobHtml).toContain('id="L1"');
+    // Anonymous blob reads bounce to login (the console auth gate).
+    expect(
+      (await get("/apps/plat/platform/blob/main/docs/docs.json")).status,
+    ).toBe(303);
+
+    // The guide endpoint: 503 without a Claude credential, 400 on an empty
+    // conversation when credentialed — never a silent hang.
+    const g = await fetch(api + "/api/v1/guide", {
+      method: "POST",
+      tls: { ca },
+      headers: {
+        authorization: `Basic ${btoa(admin)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ messages: [] }),
+    });
+    expect(g.status).toBe(process.env["CLAUDE_CODE_OAUTH_TOKEN"] ? 400 : 503);
+  }, 120_000);
 });

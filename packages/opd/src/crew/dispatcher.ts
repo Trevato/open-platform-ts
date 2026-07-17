@@ -251,6 +251,10 @@ export class Dispatcher {
         issue.repo,
         issue.number,
       );
+      // Attempt numbers are 1-based and live in the ledger: attempt 1 is the
+      // original build, each rework appends the next. attemptNo here is the
+      // attempt UNDER REVIEW; human-facing rework messages print reworkNo - 1
+      // ("rework k of maxRework") because the first attempt wasn't a rework.
       const attemptNo = priorAttempts.at(-1)?.attempt ?? 1;
       this.comment(
         issue,

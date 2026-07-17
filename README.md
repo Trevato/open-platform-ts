@@ -54,6 +54,25 @@ inlined everything) with three themes, breadcrumbs everywhere, a live crew-statu
 pill, and an ai-elements-style activity feed that renders each agent's tool calls,
 narration, and verdict as it works. Responsive from phone to ultrawide.
 
+## Docs — a manual that can't lie, and an agent that reads it
+
+The platform documents itself. `/docs` is a three-pane reading surface (grouped
+nav, scroll-spy TOC, ⌘K search) rendered from markdown that lives in
+`plat/platform` — so a merged commit updates the manual live, and a germinated
+daughter is born documented. Every code reference in the docs (like
+`packages/opd/src/api.ts:159`) links into the platform's own hosted source, and
+a CI checker (`test/docs.test.ts`) fails the build if any reference names a file
+or line that no longer exists — documentation that drifts can't merge. Pages are
+also served raw at `/docs/<page>.md`, `/docs/llms.txt`, and `/docs/search.json`
+for agents.
+
+One of those agents is built in: **✦ Ask** opens a guide that has read the manual
+and can see your running platform — read-only, and only what you could see
+(every tool authorizes through the same forge checks as the API). It searches
+the docs, inspects your apps, logs, work items, and the platform's own source,
+and cites the pages it used. Needs a `CLAUDE_CODE_OAUTH_TOKEN`; without one the
+docs still read fine and the button simply isn't there.
+
 ## Apps declare what they need — `op.json`
 
 Beside its Dockerfile, an app may carry an `op.json` manifest: memory/cpu,
@@ -95,8 +114,9 @@ runs fine and the crew simply stays idle.)
 - **One sovereign key seals everything.** Minted at germination, never shared,
   no escrow. Lose the key, lose the platform — that SPOF is the price of
   sovereignty, by design.
-- **Data is a directory.** Each app gets `app.db` (SQLite) + `files/` (served
-  over the S3 API), snapshotted, branched, and restored as files.
+- **Data is a directory.** Each app gets `app.db` (SQLite) + `files/` for
+  blobs, snapshotted, branched, and restored as files. (An S3-subset API over
+  `files/` is planned — see `docs/plan.md`.)
 
 See `docs/plan.md` for the build plan and `docs/design/` for the research and
 architecture dossiers behind every decision.

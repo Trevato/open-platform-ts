@@ -21,6 +21,7 @@
     "@op/identity": "workspace:*",
     "@op/mitosis": "workspace:*",
     "@op/secrets": "workspace:*",
-    "@op/store": "workspace:*"
+    "@op/store": "workspace:*",
+    "zod": "^4.0.0"
   }
 }

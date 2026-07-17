@@ -38,7 +38,8 @@ export interface HostRow {
   owner: string;
   app: string;
   container_id: string | null;
-  container_port: number | null;
+  /** The HOST loopback port the container published — what the gate dials. */
+  host_port: number | null;
   updated_at: number;
 }
 
@@ -447,16 +448,16 @@ export class Store {
     owner: string,
     app: string,
     containerId: string,
-    containerPort: number,
+    hostPort: number,
   ): void {
     this.db.run(
-      `INSERT INTO hosts (host, owner, app, container_id, container_port, updated_at)
+      `INSERT INTO hosts (host, owner, app, container_id, host_port, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(host) DO UPDATE SET
          owner = excluded.owner, app = excluded.app,
-         container_id = excluded.container_id, container_port = excluded.container_port,
+         container_id = excluded.container_id, host_port = excluded.host_port,
          updated_at = excluded.updated_at`,
-      [host, owner, app, containerId, containerPort, Date.now()],
+      [host, owner, app, containerId, hostPort, Date.now()],
     );
   }
 

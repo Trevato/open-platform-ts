@@ -42,6 +42,9 @@ export function parseVerdict(text: string): {
       return { kind: "untestable", line: l };
     if (l.startsWith("❌")) return { kind: "fail", line: l };
   }
+  // No verdict line at all — fail-closed: the dispatcher treats anything that
+  // isn't an explicit pass/untestable as FAIL, so an agent that crashed or
+  // rambled can never ship code. The tail is kept as the "blockers" context.
   return { kind: "unknown", line: text.slice(-200) };
 }
 
