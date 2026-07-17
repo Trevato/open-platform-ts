@@ -44,10 +44,16 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit
       - run: bun run build:npm
-      # Smoke: the bundled bin must actually load before anything is published
-      # (this is exactly what would have caught the double-shebang bug).
-      - name: bundled bin loads
-        run: bun dist/bin/op.js | grep -q "op — Open Platform"
+      # Smoke: install the packed tarball into a clean dir and run the bin, so
+      # its external deps resolve exactly as a consumer's would (running the
+      # bundle in-repo can't see them). Catches load-time breakage — a bad
+      # shebang, a missing dep — before anything reaches the registry.
+      - name: bundled bin loads from a clean install
+        run: |
+          TGZ="$(cd dist && npm pack --silent)"
+          D="$(mktemp -d)"; cd "$D"; echo '{"name":"smoke","private":true}' > package.json
+          bun add "$GITHUB_WORKSPACE/dist/$TGZ"
+          bun node_modules/open-platform-ts/bin/op.js | grep -q "op — Open Platform"
       # Sync guard: tag and package version must be identical.
       - name: tag matches package version
         run: |
