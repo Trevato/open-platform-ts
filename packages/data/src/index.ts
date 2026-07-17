@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -102,8 +102,16 @@ function verifySnapshotDb(dbFile: string): string | null {
     // (SQLITE_CANTOPEN); immutable=1 is the sanctioned way to read a file
     // nothing else is writing — exactly what a snapshot is. %/?/# would
     // corrupt the URI, so escape them (sd.root is operator-chosen).
+    // SQLITE_OPEN_URI is REQUIRED: bun:sqlite on Linux does not parse a
+    // `file:…?immutable=1` filename as a URI without it (the {readonly:true}
+    // form silently treats the whole string as a literal path → "unable to
+    // open database file"). macOS's system SQLite enables URI by default,
+    // which is why this only broke off-Mac. The flag makes it portable.
     const uri = dbFile.replace(/[%?#]/g, (c) => encodeURIComponent(c));
-    db = new Database(`file:${uri}?immutable=1`, { readonly: true });
+    db = new Database(
+      `file:${uri}?immutable=1`,
+      constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
+    );
   } catch (cause) {
     return String(cause);
   }
@@ -150,23 +158,31 @@ export async function snapshot(
       const id = String(ms);
       const dir = join(parent, id);
 
-      await cloneDir(live, dir);
-      // Post-checkpoint the wal is empty and the shm is a live-session
-      // artifact; a cloned shm can force readonly-recovery and fail the
-      // readonly verification open. The snapshot is app.db as of the
-      // checkpoint — exactly the crash-consistency we promise.
-      await rm(join(dir, "app.db-wal"), { force: true });
-      await rm(join(dir, "app.db-shm"), { force: true });
+      // Any failure past here must leave NO snapshot dir behind — a partial or
+      // unverified clone must never be listable. (cloneDir creates the dir
+      // before it can throw, e.g. a VACUUM-INTO fallback erroring on a corrupt
+      // source; without this catch that empty dir would linger and count as a
+      // snapshot.)
+      try {
+        await cloneDir(live, dir);
+        // Post-checkpoint the wal is empty and the shm is a live-session
+        // artifact; a cloned shm can force readonly-recovery and fail the
+        // readonly verification open. The snapshot is app.db as of the
+        // checkpoint — exactly the crash-consistency we promise.
+        await rm(join(dir, "app.db-wal"), { force: true });
+        await rm(join(dir, "app.db-shm"), { force: true });
 
-      const snapDb = join(dir, "app.db");
-      if (existsSync(snapDb)) {
-        const failure = verifySnapshotDb(snapDb);
-        if (failure !== null) {
-          await rm(dir, { recursive: true, force: true });
-          throw new Error(`snapshot verification failed: ${failure}`);
+        const snapDb = join(dir, "app.db");
+        if (existsSync(snapDb)) {
+          const failure = verifySnapshotDb(snapDb);
+          if (failure !== null)
+            throw new Error(`snapshot verification failed: ${failure}`);
         }
+        return { id, dir };
+      } catch (cause) {
+        await rm(dir, { recursive: true, force: true });
+        throw cause;
       }
-      return { id, dir };
     },
     catch: (cause) => new DataError({ message: String(cause), op }),
   });

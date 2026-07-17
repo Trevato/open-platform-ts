@@ -267,9 +267,14 @@ describe("engine (docker)", () => {
     async () => {
       // Bind mounts must live under $HOME — colima only shares $HOME into the
       // Linux VM, so a /var/folders tmpdir bind-mounts as an empty dir.
-      const { mkdirSync } = await import("node:fs");
+      const { mkdirSync, chmodSync } = await import("node:fs");
       mkdirSync(join(home, ".op-e2e"), { recursive: true });
       const work = mkdtempSync(join(home, ".op-e2e", "op-task-"));
+      // The container runs hardened as nobody:65534; mkdtemp is 0700, so on
+      // native Linux Docker that user can't write to the bind mount (colima's
+      // file sharing masks this on macOS). 0777 is the same convention the real
+      // crew workspace (container-runner) and data dirs use.
+      chmodSync(work, 0o777);
       const lines: string[] = [];
       // The 'agent' writes a file into the bind mount and prints a marker.
       const res = Result.unwrap(

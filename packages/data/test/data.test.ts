@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
 import { existsSync, mkdtempSync } from "node:fs";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,8 +30,13 @@ function openLiveDb(dir: string): Database {
 
 function rowCount(dbFile: string): number {
   // immutable: snapshot/restored dbs are WAL-mode with no -shm/-wal on disk,
-  // which a plain readonly open refuses (SQLITE_CANTOPEN).
-  const db = new Database(`file:${dbFile}?immutable=1`, { readonly: true });
+  // which a plain readonly open refuses (SQLITE_CANTOPEN). SQLITE_OPEN_URI is
+  // required for bun:sqlite to parse the file: URI off-macOS (see the same
+  // flag in verifySnapshotDb).
+  const db = new Database(
+    `file:${dbFile}?immutable=1`,
+    constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI,
+  );
   try {
     const row = db
       .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM t")
