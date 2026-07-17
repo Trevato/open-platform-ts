@@ -1,0 +1,61 @@
+name: release
+
+# Publish to npm ONLY when a version tag (v0.0.3, v1.2.0, …) is pushed — nothing
+# publishes on an ordinary push. Release flow:
+#   1. bump "version" in package.json, commit to main (CI must be green)
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# SECURITY — no npm token is stored anywhere:
+#   • Trusted Publishing (OIDC): GitHub proves THIS workflow's identity to npm,
+#     which mints a short-lived, single-use credential. There is no long-lived
+#     secret to leak. One-time setup on npmjs.com → package "open-platform-ts" →
+#     Settings → Trusted Publisher → GitHub Actions:
+#       repository: Trevato/open-platform-ts   workflow: release.yml
+#   • Provenance: every version is signed with its source commit + run, so
+#     consumers can verify it was built from this repo:  npm audit signatures
+#   • Pinned action SHAs (Dependabot keeps them current) — a moved tag can't
+#     inject code. Least-privilege permissions. Frozen lockfile.
+#
+# SYNC — npm ⟺ git tag ⟺ commit can never drift: the job refuses to publish
+# unless the pushed tag equals the package.json version, and it builds from the
+# tagged commit, so what ships is exactly what's tagged.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # OIDC identity for trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.13"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      # Trusted Publishing needs npm >= 11.5.1 (newer than Node 22 bundles).
+      - run: npm install -g npm@latest
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun run build:npm
+      # Smoke: the bundled bin must actually load before anything is published
+      # (this is exactly what would have caught the double-shebang bug).
+      - name: bundled bin loads
+        run: bun dist/bin/op.js | grep -q "op — Open Platform"
+      # Sync guard: tag and package version must be identical.
+      - name: tag matches package version
+        run: |
+          PKG=$(node -p "require('./dist/package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "tag=$TAG  package=$PKG"
+          test "$PKG" = "$TAG"
+      # No NODE_AUTH_TOKEN: authentication is the OIDC exchange above.
+      - name: publish
+        working-directory: dist
+        run: npm publish --provenance --access public
