@@ -95,6 +95,18 @@ async function cloneDir(src: string, dest: string): Promise<void> {
   }
 }
 
+// Recursively make a data tree readable+writable by any container user: dirs
+// 0777, files 0666. Used after a cross-platform import, where the copied files
+// are owned by the daemon, not the app's non-root container user.
+async function makeContainerWritable(dir: string): Promise<void> {
+  await chmod(dir, 0o777);
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) await makeContainerWritable(p);
+    else await chmod(p, 0o666);
+  }
+}
+
 function verifySnapshotDb(dbFile: string): string | null {
   let db: Database;
   try {
@@ -337,9 +349,13 @@ export async function importDataDir(
         // No db in the artifact — still guarantee the standard layout exists.
         await mkdir(join(live, "files"), { recursive: true });
       }
-      await chmod(live, 0o777);
-      const files = join(live, "files");
-      if (existsSync(files)) await chmod(files, 0o777);
+      // The importing daemon owns the copied tree, but the app runs as a
+      // DIFFERENT (non-root) container user and must read AND write its own
+      // db + blobs. Same-platform clones keep the app's own ownership; a
+      // cross-platform import does not — so make every copied file writable,
+      // not just the dirs (a 0644 app.db → the container can't open it rw →
+      // the app crashes on boot).
+      await makeContainerWritable(live);
     },
     catch: (cause) =>
       cause instanceof DataError
