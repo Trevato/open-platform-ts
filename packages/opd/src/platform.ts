@@ -37,7 +37,9 @@ import {
 import { Store } from "@op/store";
 import { verifyAccessToken } from "@op/identity";
 import { apiRouter } from "./api.ts";
+import { DocsSource } from "./console/docs.ts";
 import { consoleRouter } from "./console/index.ts";
+import { runGuide } from "./crew/guide.ts";
 import { oidcRouter } from "./oidc.ts";
 import { ensureSigningKey } from "./oidc-clients.ts";
 import { Dispatcher } from "./crew/dispatcher.ts";
@@ -298,6 +300,10 @@ export class Platform {
         // via the `claude` CLI). Drives the caged build/review agents and the
         // lightweight issue composer; absent → those degrade gracefully.
         const claudeToken = process.env["CLAUDE_CODE_OAUTH_TOKEN"] ?? null;
+        const genesisRoot = opts.genesisDir ?? defaultGenesisDir();
+        // One docs source for the console (pages), the API (llms.txt), and
+        // the guide (its manual) — cached on plat/platform's main sha.
+        const docsSource = new DocsSource(git, store, genesisRoot);
         const forgeRoutes = forgeRouter(forge, git);
         const apiRoutes = apiRouter({
           sd,
@@ -322,6 +328,31 @@ export class Platform {
             : null,
           domain: opts.domain,
           appPolicy: () => platformConfig.get().apps,
+          guide: claudeToken
+            ? async (guideOpts) => {
+                const out = await runGuide(
+                  {
+                    sd,
+                    store,
+                    forge,
+                    git,
+                    engine,
+                    docs: docsSource,
+                    domain: opts.domain,
+                    srcDir: join(genesisRoot, ".."),
+                    appPolicy: () => platformConfig.get().apps,
+                    loadAgent: (role) => platformConfig.loadAgent(role),
+                    oauthToken: claudeToken,
+                    model: () => platformConfig.get().crew.model,
+                    log,
+                  },
+                  guideOpts,
+                );
+                return out.status === "ok"
+                  ? { ok: true }
+                  : { ok: false, error: out.error.message };
+              }
+            : null,
           log,
         });
         const oidcRoutes = oidcRouter({ forge, store, key: oidcKey, log });
@@ -332,6 +363,8 @@ export class Platform {
           sd,
           domain: opts.domain,
           appPolicy: () => platformConfig.get().apps,
+          docs: docsSource,
+          guideEnabled: claudeToken !== null,
         });
         // API/git win first (machines); OIDC before the console; the console is
         // the human face fallback.

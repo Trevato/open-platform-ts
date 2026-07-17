@@ -4,7 +4,8 @@ import { listSnapshots, snapshot } from "@op/data";
 import type { Engine } from "@op/engine";
 import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
-import type { IssueRow, Store, WorkPhase } from "@op/store";
+import type { IssueRow, Store, UserRow, WorkPhase } from "@op/store";
+import type { GuideEvent, GuideMessage } from "./crew/guide.ts";
 import { appSpecPath, commitFiles, readAppSpecs, TEMPLATE } from "./gitops.ts";
 import { computeIntegrationMap } from "./integration.ts";
 import type { AppPolicy } from "./manifest.ts";
@@ -138,6 +139,16 @@ export interface ApiDeps {
   /** Operator bounds for op.json — used to admit manifests when deriving
    *  the integration map. */
   appPolicy: () => AppPolicy;
+  /** The in-console guide agent, or null when no Claude credential is
+   *  configured (the console then hides the Ask affordance). */
+  guide:
+    | ((opts: {
+        user: UserRow;
+        messages: GuideMessage[];
+        pagePath: string | null;
+        onEvent: (ev: GuideEvent) => void;
+      }) => Promise<{ ok: boolean; error?: string }>)
+    | null;
   log: Log;
 }
 
@@ -938,6 +949,69 @@ export function apiRouter(
         deps.forge.queueWork(user, owner, repo, n);
       deps.kickCrew(); // labeling agent-work wakes the crew
       return json(r.value);
+    }
+
+    // POST /api/v1/guide — the in-console guide agent, SSE. The conversation
+    // travels in the body (nothing persists server-side); events stream back
+    // in the composer's wire shape: thinking → text deltas → tool markers →
+    // sources → done. 503 when no Claude credential is configured.
+    if (req.method === "POST" && path === "/api/v1/guide") {
+      const user = await deps.forge.authenticate(req);
+      if (!user) return json({ error: "unauthorized" }, 401);
+      const runGuide = deps.guide;
+      if (!runGuide) return json({ error: "guide_offline" }, 503);
+      const body = (await req.json().catch(() => null)) as {
+        messages?: Array<{ role?: string; content?: string }>;
+        page?: string;
+      } | null;
+      const messages: GuideMessage[] = (body?.messages ?? [])
+        .slice(-20)
+        .map((m) => ({
+          role:
+            m.role === "assistant" ? ("assistant" as const) : ("user" as const),
+          content: String(m.content ?? "").slice(0, 8_000),
+        }))
+        .filter((m) => m.content.trim().length > 0);
+      if (!messages.length) return json({ error: "messages required" }, 400);
+      const pagePath =
+        typeof body?.page === "string" &&
+        body.page.startsWith("/") &&
+        body.page.length < 300
+          ? body.page
+          : null;
+
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const enc = new TextEncoder();
+          const send = (o: unknown) => {
+            try {
+              controller.enqueue(enc.encode(`data: ${JSON.stringify(o)}\n\n`));
+            } catch {
+              /* client gone */
+            }
+          };
+          try {
+            const out = await runGuide({
+              user,
+              messages,
+              pagePath,
+              onEvent: send,
+            });
+            if (!out.ok)
+              send({ type: "error", error: out.error ?? "guide failed" });
+          } catch (e) {
+            send({ type: "error", error: String(e) });
+          }
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          "x-accel-buffering": "no",
+        },
+      });
     }
 
     // GET /api/v1/crew — the crew's cross-app queue by phase: what's actively

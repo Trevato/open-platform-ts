@@ -139,7 +139,7 @@ export class Gate {
         return text(403, "forbidden");
       }
 
-      if (row.container_port === null) return text(502, "app not running");
+      if (row.host_port === null) return text(502, "app not running");
       if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
         return text(501, "websocket upgrade not supported");
       }
@@ -148,7 +148,7 @@ export class Gate {
         url,
         rawHost,
         user,
-        row.container_port,
+        row.host_port,
       );
     } catch (cause) {
       this.opts.log?.error("gate request failed", { error: String(cause) });

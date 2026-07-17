@@ -32,6 +32,18 @@ const AUTHOR_FLAGS = [
 
 const NO_CACHE = { "cache-control": "no-cache" } as const;
 
+// Error messages show the command minus `-c key=value` config noise — each
+// `-c` and ITS value only, never other args that happen to contain '='
+// (a --format=… flag is exactly what makes an error diagnosable).
+function stripConfigPairs(args: string[]): string[] {
+  const shown: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-c") i++;
+    else shown.push(args[i]!);
+  }
+  return shown;
+}
+
 function pktLine(payload: string): string {
   return (payload.length + 4).toString(16).padStart(4, "0") + payload;
 }
@@ -106,7 +118,7 @@ export class GitHost {
       if (code !== 0) {
         return Result.err(
           new GitError({
-            message: `git ${args.filter((a) => a !== "-c" && !a.includes("=")).join(" ")} exited ${code}: ${stderr.trim()}`,
+            message: `git ${stripConfigPairs(args).join(" ")} exited ${code}: ${stderr.trim()}`,
             op,
           }),
         );

@@ -10,11 +10,13 @@ const ALLOWED = new Set([
   "age-encryption", // typage — sovereign sealing (secrets)
   "jose", // token/OIDC crypto (identity provider, gate/ACME later)
   "@peculiar/x509", // CA + cert minting (gate)
-  "@anthropic-ai/claude-agent-sdk", // in-process issue composer (opd) — the
-  // oat token only works via the SDK/CLI; the SDK gives structured output +
-  // the raw-API fast lane. The caged BUILD/REVIEW crew still uses the CLI in
-  // containers (zero host deps); this is opd-only, off the germination path.
-  // M2/M3, pre-approved by the plan: "ai", "zod", "@modelcontextprotocol/sdk", "playwright"
+  "@anthropic-ai/claude-agent-sdk", // in-process issue composer + docs guide
+  // (opd) — the oat token only works via the SDK/CLI; the SDK gives structured
+  // output + in-process MCP tools. The caged BUILD/REVIEW crew still uses the
+  // CLI in containers (zero host deps); this is opd-only, off the germination
+  // path.
+  "zod", // guide tool schemas — the agent SDK's required peer for tool()
+  // M2/M3, pre-approved by the plan: "ai", "@modelcontextprotocol/sdk", "playwright"
 ]);
 
 describe("dependency budget", () => {

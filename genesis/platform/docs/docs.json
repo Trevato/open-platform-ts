@@ -1,0 +1,40 @@
+{
+  "sections": [
+    {
+      "title": "Start here",
+      "pages": ["index", "quickstart", "how-it-builds"]
+    },
+    {
+      "title": "Concepts",
+      "pages": [
+        "architecture",
+        "gitops",
+        "work-items",
+        "crew",
+        "data",
+        "ingress",
+        "identity",
+        "sovereignty"
+      ]
+    },
+    {
+      "title": "Guides",
+      "pages": [
+        "deploy-an-app",
+        "app-manifest",
+        "connect-apps",
+        "game-servers",
+        "import-an-app",
+        "orgs",
+        "snapshots",
+        "operate",
+        "self-source",
+        "docs"
+      ]
+    },
+    {
+      "title": "Reference",
+      "pages": ["cli", "api", "manifest-schema", "env", "security"]
+    }
+  ]
+}
