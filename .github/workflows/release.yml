@@ -67,6 +67,4 @@ jobs:
       # No token: npm authenticates via the OIDC → trusted-publisher exchange.
       - name: publish
         working-directory: dist
-        run: |
-          echo "npm $(npm --version)  registry $(npm config get registry)"
-          npm publish --provenance --access public --loglevel verbose
+        run: npm publish --provenance --access public
