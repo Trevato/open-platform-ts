@@ -34,5 +34,11 @@ jobs:
           echo hi > "$HOME/.op-e2e/a" && cp --reflink=always "$HOME/.op-e2e/a" "$HOME/.op-e2e/b" && echo "reflink OK"
       # Untimed cache warm: the M1 clock starts inside the test, not here.
       - run: docker pull -q oven/bun:1-alpine
+      # Real Linux deployments run the daemon as root (it drives the Docker
+      # socket). Snapshotting a *running* app means the host reads db files a
+      # hardened, non-root (65534) container wrote — only root (or macOS's
+      # Docker-Desktop uid mapping) can. Run the suite as root so the
+      # live-container e2e tests mirror a real deploy instead of the runner's
+      # unprivileged user.
       - name: unit + M1 full loop (soft 60s / hard 90s)
-        run: bun test
+        run: sudo -E env HOME="$HOME" PATH="$PATH" TMPDIR="$TMPDIR" bun test
