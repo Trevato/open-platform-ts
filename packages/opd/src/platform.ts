@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,8 +85,23 @@ const ADMIN_USER = "plat";
 const QA_USER = "qa";
 
 function defaultGenesisDir(): string {
-  // packages/opd/src → repo root/genesis. Compiled binaries must pass genesisDir.
-  return join(import.meta.dir, "..", "..", "..", "genesis");
+  // Resolve genesis/ across every layout this file runs in: the source tree
+  // (packages/opd/src → repo root), and a bundled npm package where the built
+  // bin sits beside genesis/ (dist/bin/op.js → ../genesis, or dist/op.js →
+  // ./genesis). OP_GENESIS_DIR overrides for anything exotic. The marker is a
+  // file that only the real genesis tree has.
+  const env = process.env["OP_GENESIS_DIR"];
+  if (env) return env;
+  const candidates = [
+    join(import.meta.dir, "..", "..", "..", "genesis"),
+    join(import.meta.dir, "..", "genesis"),
+    join(import.meta.dir, "genesis"),
+  ];
+  return (
+    candidates.find((dir) =>
+      existsSync(join(dir, "platform", "platform.json")),
+    ) ?? candidates[0]!
+  );
 }
 
 export class Platform {
