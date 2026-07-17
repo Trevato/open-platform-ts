@@ -68,5 +68,5 @@ jobs:
       - name: publish
         working-directory: dist
         run: |
-          npm --version
-          npm publish --provenance --access public
+          echo "npm $(npm --version)  registry $(npm config get registry)"
+          npm publish --provenance --access public --loglevel verbose
