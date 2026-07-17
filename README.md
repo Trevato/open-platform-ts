@@ -12,19 +12,31 @@ again — is proven by one CI test in **under a minute**.
 
 ## Quickstart
 
+You need [Bun](https://bun.sh) and a reachable Docker socket. Then, zero install:
+
 ```sh
-op up                 # boot a platform on *.localtest.me, print your card
+bunx open-platform-ts up      # boot a platform on *.localtest.me, print your card
+```
+
+That serves on ports **80/443** by default. If those are taken (a dev proxy, an
+ssh tunnel), pick your own — the card prints the URL it actually bound:
+
+```sh
+HTTP_PORT=8080 HTTPS_PORT=8443 bunx open-platform-ts up
+# → console at https://plat.localtest.me:8443, public docs at /docs
 ```
 
 The card prints an admin password and a first-app `curl`. Open the console at
 the platform URL, name an app, and it ships in seconds. Then describe a feature
-and the build crew grows it.
+and the build crew grows it. (`bunx open-platform-ts <cmd>` runs any command;
+`bun add -g open-platform-ts` installs it as `op` if you'd rather type `op up`.)
 
 To hand a whole platform to someone else:
 
 ```sh
-op seed my-platform.tar.gz     # export a genome
-op germinate my-platform.tar.gz other.example.com   # they grow a sovereign copy
+bunx open-platform-ts seed my-platform.tar.gz     # export a genome
+# they grow a sovereign copy:
+SEED=my-platform.tar.gz DOMAIN=other.example.com bunx open-platform-ts germinate
 ```
 
 ## The build crew — describe it, and it ships
