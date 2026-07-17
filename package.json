@@ -2,7 +2,29 @@
   "name": "open-platform-ts",
   "private": true,
   "version": "0.0.1",
+  "description": "One Bun process that is a complete software platform — git hosting, identity (OIDC), CI, app deployment, per-app data, TLS ingress, and an AI build crew — and it can reproduce into sovereign daughter platforms.",
   "license": "MIT",
+  "author": "trevato",
+  "homepage": "https://github.com/Trevato/open-platform-ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Trevato/open-platform-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Trevato/open-platform-ts/issues"
+  },
+  "keywords": [
+    "platform",
+    "paas",
+    "self-hosted",
+    "bun",
+    "git-hosting",
+    "oidc",
+    "docker",
+    "ai-agents",
+    "sovereign",
+    "gitops"
+  ],
   "workspaces": [
     "packages/*"
   ],

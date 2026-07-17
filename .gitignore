@@ -2,6 +2,10 @@ node_modules/
 *.log
 .DS_Store
 /tmp/
+dist/
+# Seed / app-export artifacts (op seed, op app export)
+*.tar.gz
+*.tgz
 *.age
 !**/fixtures/**/*.age
 # Secrets — never commit
