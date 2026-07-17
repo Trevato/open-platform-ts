@@ -38,7 +38,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
+          # NO registry-url: it writes an .npmrc with a token placeholder, which
+          # makes npm attempt (empty) token auth and skip the OIDC exchange.
+          # Trusted publishing wants no token config at all — npm defaults to
+          # registry.npmjs.org and uses OIDC when id-token is available.
       # Trusted Publishing needs npm >= 11.5.1 (newer than Node 22 bundles).
       - run: npm install -g npm@latest
       - run: bun install --frozen-lockfile
@@ -61,7 +64,9 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           echo "tag=$TAG  package=$PKG"
           test "$PKG" = "$TAG"
-      # No NODE_AUTH_TOKEN: authentication is the OIDC exchange above.
+      # No token: npm authenticates via the OIDC → trusted-publisher exchange.
       - name: publish
         working-directory: dist
-        run: npm publish --provenance --access public
+        run: |
+          npm --version
+          npm publish --provenance --access public
