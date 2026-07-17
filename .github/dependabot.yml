@@ -1,0 +1,11 @@
+# Keep the pinned GitHub Action SHAs current — pinning is the security win, but
+# stale pins miss upstream fixes. Dependabot opens a PR (with the new SHA + the
+# version comment) when an action updates, so pins stay both fixed and fresh.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
