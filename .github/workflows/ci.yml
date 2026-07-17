@@ -15,6 +15,23 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit
+      # The data plane clones app dirs copy-on-write (APFS/XFS-reflink/btrfs);
+      # GitHub's runners are ext4 with no reflink, so live-db snapshots and
+      # preview data-branches fall back to a best-effort copy that can't be
+      # crash-consistent. Give the tests a real reflink filesystem: an XFS
+      # loopback mounted where they root their state ($HOME/.op-e2e + TMPDIR).
+      - name: Copy-on-write scratch filesystem (XFS reflink)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xfsprogs
+          dd if=/dev/zero of=/tmp/cow.img bs=1M count=3072 status=none
+          mkfs.xfs -m reflink=1 -q /tmp/cow.img
+          mkdir -p "$HOME/.op-e2e"
+          sudo mount -o loop /tmp/cow.img "$HOME/.op-e2e"
+          sudo chown "$USER:$USER" "$HOME/.op-e2e"
+          mkdir -p "$HOME/.op-e2e/tmp"
+          echo "TMPDIR=$HOME/.op-e2e/tmp" >> "$GITHUB_ENV"
+          # prove reflink is actually available
+          echo hi > "$HOME/.op-e2e/a" && cp --reflink=always "$HOME/.op-e2e/a" "$HOME/.op-e2e/b" && echo "reflink OK"
       # Untimed cache warm: the M1 clock starts inside the test, not here.
       - run: docker pull -q oven/bun:1-alpine
       - name: unit + M1 full loop (soft 60s / hard 90s)
