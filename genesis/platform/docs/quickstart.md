@@ -9,8 +9,10 @@ deploys — is the one process you are about to start.
 
 ## Boot
 
+Zero install — with Bun and a Docker socket:
+
 ```sh title="Terminal"
-op up
+bunx open-platform-ts up
 ```
 
 The first boot mints the world: a sovereign key, sealed secrets, the system
@@ -24,8 +26,18 @@ ready-to-paste first-app command (`packages/opd/src/cli.ts:24`).
 > before you do anything else. Non-interactive boots must acknowledge this
 > with `FORK_KEY_ACK=1`.
 
-By default the platform serves `*.plat.localtest.me`, which resolves to
-`127.0.0.1` without any DNS setup. Set `DOMAIN` to use a real domain.
+By default the platform serves `*.plat.localtest.me` on ports **80/443**, which
+resolve to `127.0.0.1` without any DNS setup. If 80 or 443 are already in use —
+a dev proxy, an ssh tunnel — set your own ports (the card prints the URL it
+actually bound), and set `DOMAIN` to use a real domain:
+
+```sh title="Terminal"
+HTTP_PORT=8080 HTTPS_PORT=8443 bunx open-platform-ts up
+# → console at https://plat.localtest.me:8443, public docs at /docs
+```
+
+Prefer typing `op`? `bun add -g open-platform-ts` installs the same binary
+globally, so `op up` works too.
 
 ## Sign in
 
@@ -70,7 +82,7 @@ The build crew drives the `claude` CLI and needs a Claude Code OAuth token
 
 ```sh title="Terminal"
 claude setup-token          # prints sk-ant-oat01-…
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-… op up
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-… bunx open-platform-ts up
 ```
 
 Without it the platform runs fine — git, deploys, data, ingress all work —
