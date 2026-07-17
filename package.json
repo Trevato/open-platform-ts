@@ -31,7 +31,8 @@
   "scripts": {
     "test": "bun test",
     "test:m1": "bun test test/m1.e2e.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:npm": "bun run scripts/build-package.ts"
   },
   "devDependencies": {
     "@op/core": "workspace:*",
