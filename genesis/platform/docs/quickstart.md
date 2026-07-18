@@ -45,6 +45,12 @@ Open the console at the URL on the card and sign in as `plat` with the
 printed password. You land on the dashboard: a text box that asks what you
 spend time on.
 
+> [!tip]
+> Missed the password, or the card said "set on first boot"? It's shown only
+> once at genesis. Recover it any time with `bunx open-platform-ts admin-password`
+> (or `op admin-password` if installed) — it decrypts it from the sealed store
+> with your local sovereign key.
+
 ## Ship your first app
 
 The fastest path is to describe a task in plain words — the on-ramp names an

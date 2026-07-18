@@ -887,3 +887,32 @@ export class Platform {
     this.store.close();
   }
 }
+
+/**
+ * Recover the admin password from the sealed store with the local sovereign
+ * key — the answer to "I missed the boot card." The card prints the password
+ * only once (at genesis); every later boot says it already exists, so a user
+ * who looked away, or whose first boot failed after genesis (e.g. a port
+ * clash), has no other way back to it. Reads state only — no gate, no server.
+ */
+export async function readAdminPassword(
+  root: string,
+): Promise<Result<string, PlatformError>> {
+  return Result.tryPromise({
+    try: async () => {
+      const sd = stateDir(root);
+      if (!(await Bun.file(sd.keyFile).exists()))
+        throw new Error(`no platform at ${root} — nothing to recover`);
+      const key = Result.unwrap(await loadKeyFile(sd.keyFile));
+      const git = new GitHost(sd);
+      const secrets = Result.unwrap(
+        await openAll(key.identity, Result.unwrap(await readSecretsFile(git))),
+      );
+      const pw = secrets["ADMIN_PASSWORD"];
+      if (!pw) throw new Error("no ADMIN_PASSWORD in the sealed store");
+      return pw;
+    },
+    catch: (cause) =>
+      new PlatformError({ message: String(cause), step: "readAdminPassword" }),
+  });
+}

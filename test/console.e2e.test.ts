@@ -7,7 +7,7 @@ import { homedir as _h } from "node:os";
 import { join } from "node:path";
 import { Result } from "@op/core";
 import { resolveEngineSocket } from "@op/engine";
-import { Platform } from "@op/opd";
+import { Platform, readAdminPassword } from "@op/opd";
 
 setDefaultTimeout(120_000);
 const sock = resolveEngineSocket();
@@ -216,6 +216,14 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
     const api = "https://docs.localtest.me:28460";
     const ca = p.caCertPem;
     const admin = `plat:${p.freshAdminPassword}`;
+
+    // `op admin-password` recovers the same password the boot card printed —
+    // the way back when the card was missed.
+    expect(p.freshAdminPassword).toBeString();
+    expect(Result.unwrap(await readAdminPassword(join(base, "p")))).toBe(
+      p.freshAdminPassword!,
+    );
+
     const get = (path: string, auth?: string) =>
       fetch(api + path, {
         tls: { ca },

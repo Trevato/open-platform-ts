@@ -7,13 +7,14 @@ description: Every op command — what it does, the environment it reads, and an
 the daemon, reproduces the platform, moves apps between platforms, and
 publishes its own source. Run with no arguments it prints this same command
 list; an unknown command prints it and exits `2`
-(`packages/opd/src/cli.ts:246`).
+(`packages/opd/src/cli.ts:256`).
 
 ## Command reference
 
 | Command                             | What it does                                                  | Key env                  |
 | ----------------------------------- | ------------------------------------------------------------- | ------------------------ |
 | `op up`                             | Boot (or resume) the platform; self-upgrading when supervised | `OP_SRC`, `FORK_KEY_ACK` |
+| `op admin-password`                 | Print the admin password (recover it if you missed the card)  | `OP_ROOT`                |
 | `op serve`                          | The daemon proper — run by the supervisor, or by `up` inline  | same as `up`             |
 | `op seed [out]`                     | Boot, export a keyless platform seed tarball, stop            | —                        |
 | `op germinate [seed]`               | Grow a seed into a new sovereign platform and serve           | `SEED`, `FORK_KEY_ACK`   |
@@ -55,6 +56,19 @@ At boot the platform also reads `CLAUDE_CODE_OAUTH_TOKEN`, the crew's
 inference credential (`packages/opd/src/platform.ts:302`); without it
 everything runs except the [crew](/docs/crew). See the
 [Quickstart](/docs/quickstart) for the first-boot walkthrough.
+
+## op admin-password
+
+Prints this platform's admin password. The boot card shows it only once, at
+genesis; every later boot just notes it exists. This decrypts it from the
+sealed store with the local sovereign key and prints it — the way back when
+you looked away, or a first boot failed after genesis (a port clash) so you
+never saw the card. It reads state only — no server starts
+(`packages/opd/src/cli.ts:242`, `packages/opd/src/platform.ts:898`).
+
+```sh title="Terminal"
+op admin-password            # → the password for user `plat`
+```
 
 ## op serve
 

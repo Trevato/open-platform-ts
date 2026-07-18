@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createLog, Result } from "@op/core";
 import { readLineage } from "@op/mitosis";
-import { Platform, type PlatformOpts } from "./platform.ts";
+import { Platform, readAdminPassword, type PlatformOpts } from "./platform.ts";
 import { bunSupervisorIo, supervise, UPGRADE_EXIT } from "./supervisor.ts";
 
 function env(name: string, fallback: string): string {
@@ -30,7 +30,7 @@ function card(p: Platform): void {
 ╚════════════════════════════════════════════════════════════════════════╝
   Domain          : ${domain}
   Console/API     : https://${domain}${port}
-  Admin           : plat${p.freshAdminPassword ? `  /  ${p.freshAdminPassword}` : "  (existing password)"}
+  Admin           : plat${p.freshAdminPassword ? `  /  ${p.freshAdminPassword}` : "  (set on first boot — reveal it with 'op admin-password')"}
   Sovereign key   : ${p.sd.keyFile}
                     ⚠  KEEP THIS FILE SAFE FOREVER — it is the ONLY key to
                        this platform's secrets. Back it up offline.
@@ -239,9 +239,21 @@ async function main(): Promise<number> {
         console.log(line);
       return 0;
     }
+    case "admin-password": {
+      // Recover the admin password (printed once on the first-boot card) from
+      // the sealed store — the fix for "I looked away and lost it".
+      const root = env("OP_ROOT", join(homedir(), ".op", domain));
+      const pw = await readAdminPassword(root);
+      if (pw.status === "error") {
+        console.error(`op admin-password FAILED: ${pw.error.message}`);
+        return 1;
+      }
+      console.log(pw.value);
+      return 0;
+    }
     default:
       console.log(
-        "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (OP_SRC=)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
+        "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op admin-password        print this platform's admin password\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (OP_SRC=)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
       );
       return cmd ? 2 : 0;
   }
