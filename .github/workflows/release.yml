@@ -24,7 +24,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write # create the GitHub Release for the tag (gh release create)
   id-token: write # OIDC identity for trusted publishing + provenance
 
 jobs:
@@ -68,3 +68,11 @@ jobs:
       - name: publish
         working-directory: dist
         run: npm publish --provenance --access public
+      # Mirror the release into GitHub's Releases UI. Idempotent so a re-run
+      # after a transient failure doesn't error on an existing release.
+      - name: github release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
