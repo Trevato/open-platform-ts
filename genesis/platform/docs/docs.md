@@ -80,7 +80,7 @@ data?" — it searches these pages first, checks your live state when the
 question is about your platform, reads the source when you ask how something
 is implemented, and cites what it used as links under the answer.
 
-The guide streams over `POST /api/v1/guide` (`packages/opd/src/api.ts:958`);
+The guide streams over `POST /api/v1/guide` (`packages/opd/src/api.ts:961`);
 the conversation lives in your browser session and nothing persists
 server-side. Its instructions are a crew role like any other —
 `crew/guide/instructions.md` in `plat/platform`, hot-editable

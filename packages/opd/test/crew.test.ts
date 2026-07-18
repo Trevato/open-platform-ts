@@ -578,7 +578,7 @@ describe("dispatcher", () => {
     expect(comments).toContain("review the diff and Merge");
   });
 
-  test("without a credential, posts a note and does not build", async () => {
+  test("without a credential, stays queued and does not build (no stale comment)", async () => {
     const h = await harness();
     const d = new Dispatcher(dispatcherReviewDeps(h, null, { httpsPort: 443 }));
     fileWork(h, "app", { title: "x", body: "" });
@@ -587,10 +587,12 @@ describe("dispatcher", () => {
     const issue = h.store.getIssue("plat", "app", 1)!;
     expect(issue.phase).toBe("queued"); // stays queued until a credential appears
     expect(issue.change_state).toBeNull();
+    // No lingering comment — the console's live crew pill shows the token nudge,
+    // so a work item's feed never carries a stale "not credentialed" note.
     const comments = h.store
       .listComments("plat", "app", 1)
       .map((c) => c.body)
       .join("\n");
-    expect(comments.toLowerCase()).toContain("credential");
+    expect(comments).toBe("");
   });
 });

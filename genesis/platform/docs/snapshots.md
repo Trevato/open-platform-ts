@@ -30,13 +30,13 @@ curl -sk -u plat:<password> -X POST \
 ```
 
 You need write access to the app; the route returns `201` with the new
-snapshot's `id` (`packages/opd/src/api.ts:1148`). A `GET` on the same URL
-lists existing snapshot IDs, oldest first (`packages/opd/src/api.ts:1151`).
+snapshot's `id` (`packages/opd/src/api.ts:1158`). A `GET` on the same URL
+lists existing snapshot IDs, oldest first (`packages/opd/src/api.ts:1161`).
 
 ## Checkpoint, clone, verify
 
 Every snapshot goes through three steps, and a failure at the last one means
-no snapshot at all (`packages/data/src/index.ts:128`):
+no snapshot at all (`packages/data/src/index.ts:195`):
 
 1. **Checkpoint.** The platform flushes the app's WAL into `app.db` with
    `PRAGMA wal_checkpoint(TRUNCATE)` from the host side — SQLite's POSIX locks
@@ -47,14 +47,14 @@ no snapshot at all (`packages/data/src/index.ts:128`):
    (`packages/data/src/index.ts:63`).
 3. **Verify.** The cloned database is opened read-only (`immutable=1`) and
    must pass `PRAGMA integrity_check`; on any failure the clone is deleted and
-   the request errors (`packages/data/src/index.ts:163`). A snapshot that
+   the request errors (`packages/data/src/index.ts:131`). A snapshot that
    exists is a snapshot that opened cleanly.
 
 ## Previews run on clones
 
 The same checkpoint-and-clone primitive backs preview environments: when a
 work item's preview deploys, the platform forks prod's data into
-`appdata/<owner>/<app>@pr-<n>/` (`packages/data/src/index.ts:193`) and mounts
+`appdata/<owner>/<app>@pr-<n>/` (`packages/data/src/index.ts:250`) and mounts
 that instead of the live dir (`packages/opd/src/reconcile.ts:392`). Reviewers
 exercise real data; prod is never written. The branch persists across preview
 redeploys and is deleted when the change closes.
@@ -63,7 +63,7 @@ redeploys and is deleted when the change closes.
 
 `op app export` packages an app for another sovereign platform: its full git
 history, its `op.json`, and a fresh verified snapshot taken at export time as
-the data-of-record (`packages/opd/src/platform.ts:631`). On the target,
+the data-of-record (`packages/opd/src/platform.ts:648`). On the target,
 [import](/docs/import-an-app) lays that data down with the same
 `integrity_check` gate before the app ever starts.
 
@@ -72,7 +72,7 @@ the data-of-record (`packages/opd/src/platform.ts:631`). On the target,
 Restoring is deliberately narrower than snapshotting:
 
 - The data plane has a `restore()` primitive that replaces the live dir with a
-  named snapshot (`packages/data/src/index.ts:336`), but no console button,
+  named snapshot (`packages/data/src/index.ts:368`), but no console button,
   CLI command, or HTTP endpoint calls it yet.
 - Snapshots are plain directories. An operator with shell access can inspect
   one, copy files out, or restore by hand — stop the app first.

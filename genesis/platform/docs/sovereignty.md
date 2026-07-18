@@ -42,7 +42,7 @@ A seed is a tarball of git bundles: the [gitops](/docs/gitops) repo, the app
 template, and `plat/platform` (config, crew prompts, these docs). No key
 ships. Before bundling, the platform squashes `sys/gitops` to a single orphan
 commit with `apps/` and `secrets.age.json` deleted
-(`packages/opd/src/platform.ts:551-555`) — full history would carry the
+(`packages/opd/src/platform.ts:568-572`) — full history would carry the
 mother's old ciphertext, decryptable by her key, into every descendant's repo
 forever. The orphan commit has no parent, so no earlier tree is reachable.
 Hand the file to anyone.
@@ -76,7 +76,7 @@ renders it at `/lineage`.
 
 The per-app version of the same story: `op app export owner/app` bundles the
 repo's full history plus a fresh integrity-checked
-[data snapshot](/docs/snapshots) (`packages/opd/src/platform.ts:631`) — no key
+[data snapshot](/docs/snapshots) (`packages/opd/src/platform.ts:648`) — no key
 material, since the app's OIDC client and secrets are re-minted at deploy on
 the target. `op app import` restores the repo, verifies the data opens, and
 commits a spec remapped to the buyer's namespace

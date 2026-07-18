@@ -6,7 +6,7 @@ description: Every /api/v1 route — method, path, auth, and purpose — verifie
 The platform serves a JSON API under `/api/v1` on the platform host — the
 same surface the console uses, so anything you can click you can script. One
 handler answers it, ahead of OIDC and the console in the router chain
-(`packages/opd/src/platform.ts:373-376`). Requests that match no route fall through;
+(`packages/opd/src/platform.ts:391-393`). Requests that match no route fall through;
 errors come back as `{"error": "..."}` with a conventional status code.
 
 ## Authentication
@@ -37,21 +37,21 @@ in the owning user or org).
 | GET    | `/api/v1/integration-map?owner=` | public | The derived app graph — see [Connect apps](/docs/connect-apps) |
 
 `/healthz` is answered by the API router even though it sits outside
-`/api/v1` (`packages/opd/src/api.ts:164`). The integration map is
+`/api/v1` (`packages/opd/src/api.ts:167`). The integration map is
 deliberately public: running apps poll it as runtime discovery
-(`packages/opd/src/api.ts:170`).
+(`packages/opd/src/api.ts:171`).
 
 ## Apps
 
-Creation routes (`packages/opd/src/api.ts:183`):
+Creation routes (`packages/opd/src/api.ts:185`):
 
 | Method | Path                  | Auth          | Purpose                                                                                         |
 | ------ | --------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
 | POST   | `/api/v1/apps`        | write (owner) | Create `{name, owner?}` from the template; 201 with `cloneUrl`                                  |
-| POST   | `/api/v1/onramp`      | write (owner) | `{description, owner?, name?}` → named app + first queued build (`packages/opd/src/api.ts:255`) |
+| POST   | `/api/v1/onramp`      | write (owner) | `{description, owner?, name?}` → named app + first queued build (`packages/opd/src/api.ts:258`) |
 | POST   | `/api/v1/apps/import` | write (owner) | `{url, owner?, name?}` — clone an external repo as an app (`packages/opd/src/api.ts:348`)       |
 
-Read routes (`packages/opd/src/api.ts:1044`):
+Read routes (`packages/opd/src/api.ts:1053`):
 
 | Method | Path                                 | Auth   | Purpose                                           |
 | ------ | ------------------------------------ | ------ | ------------------------------------------------- |
@@ -65,13 +65,13 @@ Read routes (`packages/opd/src/api.ts:1044`):
 
 > [!note]
 > Listing snapshots requires `write`, not `read` — one authorization check
-> covers both verbs (`packages/opd/src/api.ts:1141`). The single-app status
+> covers both verbs (`packages/opd/src/api.ts:1151`). The single-app status
 > route is the one per-app read with no credential at all
-> (`packages/opd/src/api.ts:1125`).
+> (`packages/opd/src/api.ts:1135`).
 
 ## Orgs
 
-See [Orgs](/docs/orgs). Verified at `packages/opd/src/api.ts:442`:
+See [Orgs](/docs/orgs). Verified at `packages/opd/src/api.ts:444`:
 
 | Method | Path                        | Auth | Purpose                                             |
 | ------ | --------------------------- | ---- | --------------------------------------------------- |
@@ -81,11 +81,11 @@ See [Orgs](/docs/orgs). Verified at `packages/opd/src/api.ts:442`:
 ## Work
 
 One noun for issues and pull requests — see [Work items](/docs/work-items).
-Repo-scoped routes start at `packages/opd/src/api.ts:533`:
+Repo-scoped routes start at `packages/opd/src/api.ts:535`:
 
 | Method | Path                                           | Auth | Purpose                                                                              |
 | ------ | ---------------------------------------------- | ---- | ------------------------------------------------------------------------------------ |
-| GET    | `/api/v1/work?phase=`                          | user | Platform-wide queue; defaults to non-terminal phases (`packages/opd/src/api.ts:579`) |
+| GET    | `/api/v1/work?phase=`                          | user | Platform-wide queue; defaults to non-terminal phases (`packages/opd/src/api.ts:588`) |
 | GET    | `/api/v1/crew`                                 | user | Crew queue by phase, parked first (`packages/opd/src/api.ts:1020`)                   |
 | GET    | `/api/v1/repos/:o/:r/work?state=&phase=`       | read | List a repo's work items                                                             |
 | POST   | `/api/v1/repos/:o/:r/work`                     | user | File `{title, body?, labels?, head?, base?}`; forge checks write                     |
@@ -97,23 +97,23 @@ Repo-scoped routes start at `packages/opd/src/api.ts:533`:
 | POST   | `/api/v1/repos/:o/:r/work/:n/deps`             | user | Declare `{on: "owner/repo#n"}` blocked-by                                            |
 | DELETE | `/api/v1/repos/:o/:r/work/:n/deps/:do/:dr/:dn` | user | Remove a dependency (`packages/opd/src/api.ts:701`)                                  |
 
-The verb routes share one match at `packages/opd/src/api.ts:639`; per-verb
+The verb routes share one match at `packages/opd/src/api.ts:642`; per-verb
 authorization happens in the forge.
 
 ## Issues and pulls (compat)
 
 Thin reads over the same work rows, kept for one release. Issues share work
-item numbers (`packages/opd/src/api.ts:857`); `/pulls/:num` resolves via the
+item numbers (`packages/opd/src/api.ts:852`); `/pulls/:num` resolves via the
 frozen `pull_requests` table — no new PR numbers are ever minted
-(`packages/opd/src/api.ts:756`).
+(`packages/opd/src/api.ts:731`).
 
 | Method | Path                                     | Auth | Purpose                                                                                           |
 | ------ | ---------------------------------------- | ---- | ------------------------------------------------------------------------------------------------- |
 | GET    | `/api/v1/repos/:o/:r/issues?state=`      | read | List, shaped as issue JSON                                                                        |
 | POST   | `/api/v1/repos/:o/:r/issues`             | user | Create; delegates to work, so birth-phase semantics apply                                         |
 | GET    | `/api/v1/repos/:o/:r/issues/:num`        | read | One issue with comments and blockers                                                              |
-| POST   | `/api/v1/repos/:o/:r/issues/:num/labels` | user | Replace labels; adding `agent-work` to an `intent` item queues it (`packages/opd/src/api.ts:927`) |
-| GET    | `/api/v1/repos/:o/:r/pulls`              | read | Open changes as PR JSON (`packages/opd/src/api.ts:731`)                                           |
+| POST   | `/api/v1/repos/:o/:r/issues/:num/labels` | user | Replace labels; adding `agent-work` to an `intent` item queues it (`packages/opd/src/api.ts:949`) |
+| GET    | `/api/v1/repos/:o/:r/pulls`              | read | Open changes as PR JSON (`packages/opd/src/api.ts:733`)                                           |
 | GET    | `/api/v1/repos/:o/:r/pulls/:num`         | read | One historic PR by frozen number                                                                  |
 
 ## Streaming routes
@@ -128,4 +128,4 @@ Both need a crew credential — without `CLAUDE_CODE_OAUTH_TOKEN` they return
 
 The draft route streams Server-Sent Events when `Accept` includes
 `text/event-stream` and falls back to one JSON response otherwise
-(`packages/opd/src/api.ts:806`); the guide always streams.
+(`packages/opd/src/api.ts:809`); the guide always streams.

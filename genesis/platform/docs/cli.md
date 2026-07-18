@@ -53,7 +53,7 @@ OP_SRC=~/opd-clone op up     # supervised, self-upgrading
 ```
 
 At boot the platform also reads `CLAUDE_CODE_OAUTH_TOKEN`, the crew's
-inference credential (`packages/opd/src/platform.ts:302`); without it
+inference credential (`packages/opd/src/platform.ts:318`); without it
 everything runs except the [crew](/docs/crew). See the
 [Quickstart](/docs/quickstart) for the first-boot walkthrough.
 
@@ -64,7 +64,7 @@ genesis; every later boot just notes it exists. This decrypts it from the
 sealed store with the local sovereign key and prints it — the way back when
 you looked away, or a first boot failed after genesis (a port clash) so you
 never saw the card. It reads state only — no server starts
-(`packages/opd/src/cli.ts:242`, `packages/opd/src/platform.ts:898`).
+(`packages/opd/src/cli.ts:242`, `packages/opd/src/platform.ts:899`).
 
 ```sh title="Terminal"
 op admin-password            # → the password for user `plat`

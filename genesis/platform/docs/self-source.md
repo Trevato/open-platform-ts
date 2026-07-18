@@ -28,7 +28,7 @@ op host-source
 
 The command (`packages/opd/src/cli.ts:208`) publishes the platform's own
 tracked source into `plat/opd` via `git archive HEAD`
-(`packages/opd/src/platform.ts:834`): no `.git` history, and no untracked
+(`packages/opd/src/platform.ts:851`): no `.git` history, and no untracked
 files — a stray secret in the source directory can never land in the
 world-readable repo, which an e2e test proves with a planted `SECRET.token`
 (`test/host-source.e2e.test.ts:60`). Re-running is a no-op once `plat/opd`
@@ -46,7 +46,7 @@ OP_SRC=$PWD op up
 ```
 
 Now a push to `plat/opd` asks the daemon to upgrade
-(`packages/opd/src/platform.ts:442`): it stops cleanly and exits with the
+(`packages/opd/src/platform.ts:461`): it stops cleanly and exits with the
 upgrade code; the supervisor pulls the new source into `OP_SRC` and
 re-execs. If the new daemon fails to stay up, the supervisor resets the
 source to the last-good ref and re-execs that
@@ -69,7 +69,7 @@ correct by inspection, and the human who merges typechecks it.
 > [!warning]
 > Self-repos never auto-merge. The crew parks the finished branch as a
 > proposed change — no preview, no reviewer verdict, no ship
-> (`packages/opd/src/crew/dispatcher.ts:210`). A human reads the diff and
+> (`packages/opd/src/crew/dispatcher.ts:207`). A human reads the diff and
 > presses Merge. The [crew](/docs/crew) can rewrite the platform, but only
 > a person can make it so.
 
