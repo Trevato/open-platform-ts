@@ -148,6 +148,28 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
       issues.issues.find((i) => i.number === i1.number)!.openBlockers,
     ).toEqual([i2.number]);
 
+    // ── crew queue: 'migrated' parks are residue, not a human ask ─────────
+    // Reproduce the schema migration (raw SQL, as the migration does): one item
+    // parked 'migrated', one parked for a real reason. Only the real one may
+    // count toward the "N parked — need you" alarm.
+    p.store.db.run(
+      "UPDATE issues SET phase='parked', state='open', parked_reason='migrated' WHERE owner='acme' AND repo='store' AND number=?",
+      [i1.number],
+    );
+    p.store.db.run(
+      "UPDATE issues SET phase='parked', state='open', parked_reason='build-failed' WHERE owner='acme' AND repo='store' AND number=?",
+      [i2.number],
+    );
+    const crew = (await (await getHtml("/api/v1/crew")).json()) as {
+      blocked: number;
+      items: Array<{ number: number; parkedReason: string | null }>;
+    };
+    expect(crew.items.some((i) => i.parkedReason === "migrated")).toBe(false);
+    expect(crew.items.some((i) => i.number === i2.number)).toBe(true); // the genuine build-failed park is still surfaced
+    expect(crew.blocked).toBe(
+      crew.items.filter((i) => i.parkedReason !== "migrated").length,
+    );
+
     // ── on-ramp: describe a workflow → app + first build in one call ──────
     // (No Claude token here, so the composer is offline; the endpoint still
     // names the app, deploys it, and files the raw description as agent-work.)

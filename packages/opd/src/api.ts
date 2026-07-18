@@ -1028,8 +1028,14 @@ export function apiRouter(
         phase: i.phase,
         parkedReason: i.parked_reason,
       });
-      // Parked first (needs a human), then in-flight.
-      const blocked = deps.store.listWorkByPhase("parked").map(shape);
+      // Parked first (needs a human), then in-flight. 'migrated' is not a crew
+      // ask — it's residue from the work-item schema migration parking whatever
+      // issues were open at the time (store/schema.ts) — so it must never drive
+      // the "N parked — need you" alarm on an otherwise-clean platform.
+      const blocked = deps.store
+        .listWorkByPhase("parked")
+        .filter((i) => i.parked_reason !== "migrated")
+        .map(shape);
       const working = (
         ["building", "reworking", "reviewing", "queued"] as const
       ).flatMap((p) => deps.store.listWorkByPhase(p).map(shape));
