@@ -16,7 +16,7 @@ bunx open-platform-ts up
 ```
 
 The first boot mints the world: a sovereign key, sealed secrets, the system
-repos, and an admin user (`packages/opd/src/platform.ts:164`). It ends by printing
+repos, and an admin user (`packages/opd/src/platform.ts:181`). It ends by printing
 your platform card — domain, console URL, the admin password, and a
 ready-to-paste first-app command (`packages/opd/src/cli.ts:24`).
 
@@ -66,7 +66,7 @@ URL. The whole pipeline streams live on the work item's page.
 
 If you'd rather push code, create an app (seeded from the starter template)
 and clone it — every app is a git repo on your platform
-(`packages/opd/src/api.ts:183`):
+(`packages/opd/src/api.ts:185`):
 
 ```sh title="Terminal"
 curl -sk -u plat:<password> -X POST https://plat.localtest.me/api/v1/apps \
@@ -84,7 +84,7 @@ platform builds the Dockerfile, runs the container, and routes
 ## Give the crew its credential
 
 The build crew drives the `claude` CLI and needs a Claude Code OAuth token
-(`packages/opd/src/platform.ts:302`):
+(`packages/opd/src/platform.ts:318`):
 
 ```sh title="Terminal"
 claude setup-token          # prints sk-ant-oat01-…

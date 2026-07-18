@@ -29,7 +29,7 @@ for the full format):
 
 Each `consumes` entry injects `OP_PEER_<APP>_URL` into your container at
 deploy — the app name uppercased, dashes to underscores
-(`packages/opd/src/manifest.ts:64`, injected at
+(`packages/opd/src/manifest.ts:65`, injected at
 `packages/opd/src/reconcile.ts:448`). Omitting `owner` defaults the peer to
 your own owner. `provides` is documentation-grade: it labels your surface on
 the integration map, nothing enforces it.
@@ -50,7 +50,7 @@ seconds before expiry, and retries once on 401.
 
 The token dies at the gate: the audience is verified against the host
 actually being called, so a token minted for one app verifies as nothing at
-any other (`packages/opd/src/platform.ts:397`). Your peer never parses a
+any other (`packages/opd/src/platform.ts:426`). Your peer never parses a
 JWT — it reads the gate-stamped `x-plat-user: app:<owner>/<app>` header, the
 same header human visitors arrive with. See [Identity](/docs/identity) for
 why that header is unforgeable.
@@ -65,7 +65,7 @@ invalidated, so it can never go stale — and it survives
 travel with the repos.
 
 Read it at `GET /api/v1/integration-map`, optionally `?owner=` scoped
-(`packages/opd/src/api.ts:170`). It is unauthenticated by design, so apps
+(`packages/opd/src/api.ts:173`). It is unauthenticated by design, so apps
 can poll it as runtime discovery — a hub sees new peers with no redeploy.
 The console renders the same graph on the **Integrations** page. Each node
 carries `provides`, `consumes` (with a `satisfied` flag per edge), and TCP

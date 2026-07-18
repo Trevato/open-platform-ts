@@ -36,18 +36,18 @@ platform `cloneUrl`, and the number of the conversion work item.
 ## The conversion work item
 
 The import files one [work item](/docs/work-items), born queued, labeled
-`agent-import` and `agent-work` (`packages/opd/src/api.ts:421`). Its body is
-the conversion spec (`packages/opd/src/api.ts:409`): a root `Dockerfile` that
+`agent-import` and `agent-work` (`packages/opd/src/api.ts:424`). Its body is
+the conversion spec (`packages/opd/src/api.ts:412`): a root `Dockerfile` that
 builds and starts the server on `PORT`, persistent state only under
 `DATA_DIR`, a non-root container user, and the app's existing behavior kept
 intact. The acceptance criteria are explicit
-(`packages/opd/src/api.ts:419`): the preview builds, serves HTTP 200 on `/`
+(`packages/opd/src/api.ts:422`): the preview builds, serves HTTP 200 on `/`
 (or a documented health path), and survives a restart with its data intact.
 
 ## The importer role
 
 The dispatcher routes `agent-import` items to the `importer` crew role
-instead of the builder (`packages/opd/src/crew/dispatcher.ts:440`). Its
+instead of the builder (`packages/opd/src/crew/dispatcher.ts:435`). Its
 instructions are the inverse of a feature build: adapt someone else's
 project — any language, any framework — with the smallest possible diff, and
 never rewrite (`genesis/platform/crew/importer/instructions.md:5`). The

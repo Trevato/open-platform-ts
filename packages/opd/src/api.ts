@@ -118,6 +118,9 @@ export interface ApiDeps {
   reconciler: Reconciler;
   /** Wake the crew dispatcher (issue labeled agent-work). */
   kickCrew: () => void;
+  /** Whether a Claude credential is configured — the LIVE truth the console
+   *  shows, so a stale "not credentialed" comment can't mislead. */
+  crewCredentialed: () => boolean;
   /** Compose a rough idea into a structured issue draft, or null if the
    *  composer isn't credentialed (the console then files the idea as-is). */
   draftIssue:
@@ -1043,6 +1046,7 @@ export function apiRouter(
         working: working.length,
         blocked: blocked.length,
         items: [...blocked, ...working],
+        credentialed: deps.crewCredentialed(),
       });
     }
 

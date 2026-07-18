@@ -61,7 +61,6 @@ export interface DispatcherDeps {
 export class Dispatcher {
   private readonly inflight = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  private notifiedNoCred = false;
 
   constructor(private readonly deps: DispatcherDeps) {}
 
@@ -126,14 +125,10 @@ export class Dispatcher {
       // the platform's own repos (proposed to a human).
       if (!this.deps.store.getRepo(item.owner, item.repo)) continue;
       if (!this.deps.runAgent || !this.deps.oauthToken) {
-        if (!this.notifiedNoCred) {
-          this.notifiedNoCred = true;
-          this.comment(
-            item,
-            "🤖 The crew isn't credentialed yet — set `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token`) and restart the platform. This work item will build once it's set.",
-          );
-        }
-        continue; // stays queued; builds the moment a credential appears
+        // No credential: the item stays queued and builds the moment one
+        // appears. The console's crew pill shows "needs a token" live — a
+        // stored comment here would only linger and mislead once it's set.
+        continue;
       }
       // The CAS claim: losing to a concurrent claimant is normal, not an error.
       if (!this.deps.store.claimWork(item.owner, item.repo, item.number))

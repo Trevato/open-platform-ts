@@ -53,7 +53,7 @@ every coordinate:
 The host rule is one line — `<app>-<owner>.<domain>`
 (`packages/opd/src/policy.ts:85`). To put an app under an org, pass `owner`
 when creating it; the API defaults to your username and rejects any owner you
-can't write as `not a member` (`packages/opd/src/api.ts:202-204`). The
+can't write as `not a member` (`packages/opd/src/api.ts:205-207`). The
 one-motion on-ramp and [repo import](/docs/import-an-app) take the same
 `owner` field, and [work items](/docs/work-items) filed on org repos run
 through the same crew pipeline as personal ones.

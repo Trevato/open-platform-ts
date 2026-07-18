@@ -81,7 +81,7 @@ Each phase lands on the app's deploy timeline:
 ## Watching a deploy
 
 Three read endpoints cover the whole story
-(`packages/opd/src/api.ts:1065-1100`):
+(`packages/opd/src/api.ts:1074-1131`):
 
 | Route                               | What you get                                |
 | ----------------------------------- | ------------------------------------------- |
@@ -94,7 +94,7 @@ The console shows the same timeline and logs on the app's page.
 ## The deploy spec
 
 Desired state for an app lives at `apps/<owner>/<app>/app.json` in the
-`sys/gitops` repo (`packages/opd/src/policy.ts:10-17`) — see
+`sys/gitops` repo (`packages/opd/src/policy.ts:9-17`) — see
 [GitOps](/docs/gitops). Creating an app writes it for you; edit it to deploy a
 different branch or port.
 

@@ -49,12 +49,12 @@ container ever starts, so the app wakes up with its large files in place.
 
 ## Snapshots: verified or nothing
 
-A snapshot (`packages/data/src/index.ts:128`) is three steps: checkpoint the
+A snapshot (`packages/data/src/index.ts:148`) is three steps: checkpoint the
 WAL from the host, clone the whole directory copy-on-write — APFS
 `clonefile`, else `--reflink=always`, else a `VACUUM INTO` fallback
 (`packages/data/src/index.ts:63`) — then open the clone read-only and run
 `PRAGMA integrity_check`. A clone that fails verification is deleted and the
-call errors (`packages/data/src/index.ts:163-167`): the platform never hands
+call errors (`packages/data/src/index.ts:189-196`): the platform never hands
 you a bad snapshot. On a CoW filesystem a snapshot costs metadata, not a
 full copy. Day-to-day operations — taking, listing, restoring — are on
 [Snapshots](/docs/snapshots).
@@ -73,11 +73,11 @@ deletes the branch.
 
 `op app export <owner>/<app>` bundles the app's full git history, its
 manifest, and a fresh verified snapshot taken at export time
-(`packages/opd/src/platform.ts:613`). On the receiving platform, `op app
+(`packages/opd/src/platform.ts:648`). On the receiving platform, `op app
 import` lays the data down only if the app doesn't already have a live dir,
 and verifies the imported database before accepting it. Restoring a snapshot
 in place replaces the live directory wholesale
-(`packages/data/src/index.ts:336`).
+(`packages/data/src/index.ts:392`).
 
 > [!warning]
 > Restore assumes the app is stopped. Replacing `app.db` under a running

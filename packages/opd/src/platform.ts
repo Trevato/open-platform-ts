@@ -329,6 +329,7 @@ export class Platform {
           engine,
           reconciler,
           kickCrew: () => crewKick.fn(),
+          crewCredentialed: () => claudeToken !== null,
           draftIssue: claudeToken
             ? async (idea, context, onEvent) => {
                 const d = await draftIssue({

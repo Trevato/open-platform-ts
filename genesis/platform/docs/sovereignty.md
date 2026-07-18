@@ -16,7 +16,7 @@ First boot mints a sovereign age key at `<root>/key.age` — an X25519 identity
 whose recipient half seals every platform secret. The platform refuses to mint
 it until you acknowledge custody: an interactive TTY counts, and scripts must
 set `FORK_KEY_ACK=1` (`packages/opd/src/cli.ts:20`) or boot fails with SEC-1
-(`packages/opd/src/platform.ts:135`). An existing key file is never
+(`packages/opd/src/platform.ts:151`). An existing key file is never
 overwritten (`packages/secrets/src/keys.ts:31`).
 
 Secrets live in one git-diffable document, `secrets.age.json`, committed to
@@ -25,7 +25,7 @@ independently age-encrypted. Every boot runs the sovereignty gate: each value
 must decrypt with your key and its header must name exactly one recipient
 stanza — no escrow, no second recipient, no leftover parent ciphertext
 (`packages/secrets/src/seal.ts:88`). A violation aborts startup
-(`packages/opd/src/platform.ts:239`).
+(`packages/opd/src/platform.ts:255`).
 
 > [!warning]
 > `key.age` is the only decryptor. There is no escrow and no recovery. Back it
@@ -55,12 +55,12 @@ SEED=seed.tar.gz DOMAIN=you.example FORK_KEY_ACK=1 op germinate
 
 Germination refuses an occupied root and unacknowledged custody, then: mints a
 fresh sovereign key — never derived from the parent
-(`packages/opd/src/platform.ts:757`); restores the repos from bundles;
+(`packages/opd/src/platform.ts:774`); restores the repos from bundles;
 regenerates every secret in the platform inventory
 (`packages/secrets/src/regen.ts:20`) sealed to the daughter's recipient,
 replacing the parent's ciphertext wholesale; reads the committed file back and
 runs the sovereignty gate to prove every value decrypts with the daughter's
-key (`packages/opd/src/platform.ts:780`); records lineage; then boots
+key (`packages/opd/src/platform.ts:797`); records lineage; then boots
 normally.
 
 Parents can never read children: the daughter's key is minted locally and
@@ -80,5 +80,5 @@ repo's full history plus a fresh integrity-checked
 material, since the app's OIDC client and secrets are re-minted at deploy on
 the target. `op app import` restores the repo, verifies the data opens, and
 commits a spec remapped to the buyer's namespace
-(`packages/opd/src/platform.ts:706`). See
+(`packages/opd/src/platform.ts:712`). See
 [Import an app](/docs/import-an-app) for the buyer's walkthrough.

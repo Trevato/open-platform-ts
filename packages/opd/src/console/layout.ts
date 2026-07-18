@@ -77,9 +77,13 @@ function setTheme(t){document.documentElement.dataset.theme=t;try{localStorage.s
 // crew status pill — one cheap poll, paused on hidden tabs
 function crewTick(){var el=document.getElementById('crewpill');if(!el||document.hidden)return;
   fetch('/api/v1/crew').then(function(r){return r.ok?r.json():null}).then(function(d){if(!d)return;
-    el.className='crew'+(d.blocked?' blocked':(d.working?' working':''));
-    var dot=d.blocked?'error':(d.working?'building':'');
-    var txt=d.blocked?(d.blocked+' parked — need'+(d.blocked>1?'':'s')+' you'):(d.working?(d.working+' agent'+(d.working>1?'s':'')+' working'):'crew idle');
+    // No credential AND work is waiting → that's the live truth, above any
+    // stale per-item "not credentialed" comment. A crewless platform with no
+    // queued work just reads "idle" (the crew is optional).
+    var needsCred=d.credentialed===false&&d.working>0;
+    el.className='crew'+(needsCred||d.blocked?' blocked':(d.working?' working':''));
+    var dot=needsCred||d.blocked?'error':(d.working?'building':'');
+    var txt=needsCred?('crew needs a token — '+d.working+' waiting'):(d.blocked?(d.blocked+' parked — need'+(d.blocked>1?'':'s')+' you'):(d.working?(d.working+' agent'+(d.working>1?'s':'')+' working'):'crew idle'));
     el.innerHTML='<span class="dot '+dot+'"></span>'+txt;
   }).catch(function(){});}
 document.addEventListener('DOMContentLoaded',function(){var c=document.getElementById('tmc');if(c)setTheme(document.documentElement.dataset.theme||'dark');crewTick();setInterval(crewTick,3000);});

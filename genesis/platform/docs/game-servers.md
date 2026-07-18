@@ -76,7 +76,7 @@ username: backends reject any login that didn't come through the proxy.
 ## Worlds
 
 Backends expose a validated settings UI instead of raw `server.properties`.
-Setting `worldType` to `flat` writes `level-type=flat` plus the
+Setting `worldType` to `flat` writes `level-type=minecraft:flat` plus the
 generator-settings layer stack a superflat world requires
 (`genesis/examples/minecraft-network/server/server.ts:178-183`) — a clean
 lobby floor. World type only affects newly generated chunks, so it pairs

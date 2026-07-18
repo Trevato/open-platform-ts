@@ -162,6 +162,7 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
     );
     const crew = (await (await getHtml("/api/v1/crew")).json()) as {
       blocked: number;
+      credentialed: boolean;
       items: Array<{ number: number; parkedReason: string | null }>;
     };
     expect(crew.items.some((i) => i.parkedReason === "migrated")).toBe(false);
@@ -169,6 +170,8 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
     expect(crew.blocked).toBe(
       crew.items.filter((i) => i.parkedReason !== "migrated").length,
     );
+    // The live credential flag the console pill reads (vs a stale comment).
+    expect(crew.credentialed).toBe(p.crewCredentialed);
 
     // ── on-ramp: describe a workflow → app + first build in one call ──────
     // (No Claude token here, so the composer is offline; the endpoint still

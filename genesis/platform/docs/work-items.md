@@ -64,13 +64,13 @@ Edges may cross repos but not owners, and self-edges and cycles are rejected
 at add time, so the graph is always a DAG
 (`packages/forge/src/forge.ts:609`). The dispatcher skips a queued item while
 any blocker is in a non-terminal phase
-(`packages/opd/src/crew/dispatcher.ts:119`); when the blocker ships, the next
+(`packages/opd/src/crew/dispatcher.ts:123`); when the blocker ships, the next
 tick picks it up.
 
 ## Parked reasons
 
 The crew parks an item when it needs you, stamping a machine-readable reason
-(`packages/opd/src/crew/dispatcher.ts:405`):
+(`packages/opd/src/crew/dispatcher.ts:400`):
 
 | Reason                  | What happened                                         |
 | ----------------------- | ----------------------------------------------------- |
@@ -90,7 +90,7 @@ The crew parks an item when it needs you, stamping a machine-readable reason
 ## Human controls
 
 Everything the crew does, you can do — from the item's console page or over
-HTTP (`packages/opd/src/api.ts:638`):
+HTTP (`packages/opd/src/api.ts:491`):
 
 | Action                          | Effect                                                                                        |
 | ------------------------------- | --------------------------------------------------------------------------------------------- |

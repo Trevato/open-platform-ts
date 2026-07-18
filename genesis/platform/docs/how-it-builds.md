@@ -59,7 +59,7 @@ final message ends in exactly one verdict line
 ## Ship or rework
 
 On a pass, the platform merges the change into `main` as the system actor
-(`packages/opd/src/crew/dispatcher.ts:318`); the merge redeploys production
+(`packages/opd/src/crew/dispatcher.ts:313`); the merge redeploys production
 and tears down the preview. On a fail, the builder reworks the same branch
 with the verdict line as its spec, waits for a fresh preview, and the
 reviewer goes again — up to `crew.maxRework` times, default 2

@@ -54,11 +54,11 @@ An app calls a peer by trading its own client credentials for a short token:
 `grant_type=client_credentials` plus a `resource` parameter naming the target
 app's origin (`packages/opd/src/oidc.ts:170`). The token's audience **is**
 that origin, its subject is `app:<owner>/<app>` (previews append `@pr-N`), and
-it lives 10 minutes (`packages/opd/src/oidc.ts:189`).
+it lives 10 minutes (`packages/opd/src/oidc.ts:195`).
 
 The caller sends it as a `Bearer` header. It dies at the
 [gate](/docs/ingress): the platform verifies it against the Host actually
-being requested (`packages/opd/src/platform.ts:394`) and the container
+being requested (`packages/opd/src/platform.ts:422`) and the container
 receives no token at all — just the verified identity as an
 `x-plat-user: app:owner/app` header. A token minted for one app verifies as
 nothing at any other host, and never as a user, because the audiences are
@@ -70,7 +70,7 @@ template's `peerFetch` wraps the whole dance; see
 
 The [crew](/docs/crew)'s reviewer browses previews as `qa` — a normal
 signed-in user with no special rights, created at boot
-(`packages/opd/src/platform.ts:261`). It walks the real login flow —
+(`packages/opd/src/platform.ts:275`). It walks the real login flow —
 authorize, login, callback, session cookie — exactly as a human would, so a
 review pass proves your auth actually works for the least-privileged account.
 
