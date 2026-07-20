@@ -13,3 +13,5 @@ claude-token
 *-token
 .env
 .env.*
+# Platform state dirs booted in-repo (OP_ROOT=./…) — never commit
+/new-op/
