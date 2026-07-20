@@ -39,6 +39,32 @@ HTTP_PORT=8080 HTTPS_PORT=8443 bunx open-platform-ts up
 Prefer typing `op`? `bun add -g open-platform-ts` installs the same binary
 globally, so `op up` works too.
 
+## Run a second platform, or start over
+
+Everything a platform is — sovereign key, repos, databases, certs — lives
+under one directory, `~/.op/<domain>` by default
+(`packages/opd/src/cli.ts:15`). That makes both answers short.
+
+**Another platform on the same machine:** give it its own domain and ports.
+The state root follows the domain, so nothing collides — and any
+`*.localtest.me` name resolves to `127.0.0.1`, so invent as many as you like:
+
+```sh title="Terminal"
+DOMAIN=lab.localtest.me HTTP_PORT=9080 HTTPS_PORT=9443 bunx open-platform-ts up
+```
+
+**A truly fresh start:** stop the process and delete the root. The platform,
+its key, and every app on it are gone forever; the next `up` is genesis
+again:
+
+```sh title="Terminal"
+rm -rf ~/.op/plat.localtest.me
+```
+
+For throwaway experiments, `OP_ROOT` points the root anywhere —
+`OP_ROOT=./scratch bunx open-platform-ts up` keeps the whole world in a
+directory you can delete without ceremony.
+
 ## Sign in
 
 Open the console at the URL on the card and sign in as `plat` with the

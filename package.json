@@ -1,7 +1,7 @@
 {
   "name": "open-platform-ts",
   "private": true,
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "One Bun process that is a complete software platform — git hosting, identity (OIDC), CI, app deployment, per-app data, TLS ingress, and an AI build crew — and it can reproduce into sovereign daughter platforms.",
   "license": "MIT",
   "author": "trevato",

@@ -194,4 +194,30 @@ bun test test/console.e2e.test.ts        # orgs + deps + design render (~3s)
 bun test test/capabilities.e2e.test.ts   # op.json resources/TCP/fail-closed (~20s)
 ```
 
+### Run the local version (not the npm one)
+
+The dev loop runs the CLI straight from source — the workspace resolves every
+`@op/*` package, no build step:
+
+```sh
+bun packages/opd/src/cli.ts up           # any env applies: OP_ROOT, DOMAIN, ports
+```
+
+Before a release, test the **packaged** artifact exactly as npm serves it —
+bundle, pack the tarball, install it into a scratch dir, boot from there:
+
+```sh
+bun run build:npm
+TGZ=$(cd dist && npm pack --silent)
+mkdir -p /tmp/op-pkg-test && cd /tmp/op-pkg-test
+bun add "$OLDPWD/dist/$TGZ"
+HTTP_PORT=9080 HTTPS_PORT=9443 OP_ROOT=./fresh FORK_KEY_ACK=1 ./node_modules/.bin/op up
+```
+
+Genesis should print the card in about a second; a second `up` on the same
+root must resume (`isGenesis:false`), `/docs` must serve 200, and
+`OP_ROOT=./fresh ./node_modules/.bin/op admin-password` must print the
+password. This catches whole-package failures (bundling, genesis-dir
+resolution, relative `OP_ROOT`) that unit tests structurally can't.
+
 Full walkthrough of the business story: **`docs/DEMO.md`**.

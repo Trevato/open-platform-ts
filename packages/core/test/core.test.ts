@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { isAbsolute } from "node:path";
 import {
   isReservedAppName,
   isReservedName,
@@ -6,7 +7,9 @@ import {
   newId,
   newToken,
   randomHex,
+  repoPath,
   sha256Hex,
+  stateDir,
 } from "@op/core";
 
 describe("ids", () => {
@@ -73,5 +76,18 @@ describe("reserved names", () => {
     expect(isReservedAppName("preview")).toBe(false); // "pr" not followed by a digit is fine
     expect(isReservedAppName("printer")).toBe(false);
     expect(isReservedAppName("hello")).toBe(false);
+  });
+});
+
+describe("stateDir", () => {
+  // A relative OP_ROOT (e.g. OP_ROOT=./new-op) once produced relative repo
+  // paths, which broke every git operation running from a temp cwd — the
+  // genesis push to sys/gitops.git was the first casualty.
+  test("resolves a relative root to absolute paths everywhere", () => {
+    const sd = stateDir("./some-relative-root");
+    expect(isAbsolute(sd.root)).toBe(true);
+    expect(isAbsolute(sd.dbFile)).toBe(true);
+    expect(isAbsolute(sd.keyFile)).toBe(true);
+    expect(isAbsolute(repoPath(sd, "sys", "gitops"))).toBe(true);
   });
 });

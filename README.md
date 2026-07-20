@@ -31,6 +31,10 @@ the platform URL, name an app, and it ships in seconds. Then describe a feature
 and the build crew grows it. (`bunx open-platform-ts <cmd>` runs any command;
 `bun add -g open-platform-ts` installs it as `op` if you'd rather type `op up`.)
 
+Everything a platform is lives in one directory — `~/.op/<domain>` by default.
+A second platform is just a second domain (`DOMAIN=lab.localtest.me` plus its
+own ports); a fresh start is `rm -rf ~/.op/plat.localtest.me` and `up` again.
+
 To hand a whole platform to someone else:
 
 ```sh

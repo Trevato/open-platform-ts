@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { isValidName } from "./ids.ts";
 import { panic } from "./result.ts";
 
@@ -15,14 +15,17 @@ export interface StateDir {
 }
 
 export function stateDir(root: string): StateDir {
+  // Absolute from the start: downstream git operations run from temp working
+  // directories, where a relative OP_ROOT would silently point nowhere.
+  const abs = resolve(root);
   return {
-    root,
-    dbFile: join(root, "db.sqlite"),
-    keyFile: join(root, "key.age"),
-    reposDir: join(root, "repos"),
-    appdataDir: join(root, "appdata"),
-    certsDir: join(root, "certs"),
-    originFile: join(root, "ORIGIN"),
+    root: abs,
+    dbFile: join(abs, "db.sqlite"),
+    keyFile: join(abs, "key.age"),
+    reposDir: join(abs, "repos"),
+    appdataDir: join(abs, "appdata"),
+    certsDir: join(abs, "certs"),
+    originFile: join(abs, "ORIGIN"),
   };
 }
 
