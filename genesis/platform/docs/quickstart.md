@@ -120,6 +120,13 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-… bunx open-platform-ts up
 Without it the platform runs fine — git, deploys, data, ingress all work —
 and the crew simply stays idle. See [The crew](/docs/crew).
 
+> [!warning]
+> The variable must reach the platform's process: put it on the **same line**
+> as the `up` command (as above) or `export` it first. A bare
+> `CLAUDE_CODE_OAUTH_TOKEN=… ` on its own line sets a shell variable the
+> platform never sees. The card's **Crew** line tells you which happened —
+> `credentialed` or `idle`.
+
 ## Where to go next
 
 - **[How a request becomes software](/docs/how-it-builds)** — the pipeline

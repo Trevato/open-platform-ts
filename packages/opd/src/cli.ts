@@ -31,6 +31,7 @@ function card(p: Platform): void {
   Domain          : ${domain}
   Console/API     : https://${domain}${port}
   Admin           : plat${p.freshAdminPassword ? `  /  ${p.freshAdminPassword}` : "  (set on first boot — reveal it with 'op admin-password')"}
+  Crew            : ${p.crewCredentialed ? "credentialed — describe a task in the console and it ships" : "idle — no CLAUDE_CODE_OAUTH_TOKEN in this process's env\n                    (claude setup-token mints one; pass it on the SAME line as\n                     'op up', or export it — a bare VAR=… line is not exported)"}
   Sovereign key   : ${p.sd.keyFile}
                     ⚠  KEEP THIS FILE SAFE FOREVER — it is the ONLY key to
                        this platform's secrets. Back it up offline.

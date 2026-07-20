@@ -315,7 +315,10 @@ export class Platform {
         // The crew's inference credential — a Claude Code OAuth token (works only
         // via the `claude` CLI). Drives the caged build/review agents and the
         // lightweight issue composer; absent → those degrade gracefully.
-        const claudeToken = process.env["CLAUDE_CODE_OAUTH_TOKEN"] ?? null;
+        // Trim-or-null: an empty or whitespace value (a mis-quoted shell line)
+        // must read as absent everywhere, not "credentialed but broken".
+        const claudeToken =
+          process.env["CLAUDE_CODE_OAUTH_TOKEN"]?.trim() || null;
         const genesisRoot = opts.genesisDir ?? defaultGenesisDir();
         // One docs source for the console (pages), the API (llms.txt), and
         // the guide (its manual) — cached on plat/platform's main sha.
