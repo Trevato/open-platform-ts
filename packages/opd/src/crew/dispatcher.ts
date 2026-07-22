@@ -176,7 +176,20 @@ export class Dispatcher {
       if (!this.deps.store.claimWork(item.owner, item.repo, item.number))
         continue;
       this.inflight.add(k);
-      void this.process(item).finally(() => this.inflight.delete(k));
+      // .catch is load-bearing: process() ends in a park()/merge() whose
+      // setWorkPhase CAS THROWS on an illegal/late transition (e.g. a human
+      // Close during a build). Unhandled, that rejection can take the whole
+      // daemon down. Swallow-and-log here — the item's row is already
+      // consistent (the CAS simply didn't apply), and the next tick re-picks
+      // anything still actionable.
+      void this.process(item)
+        .catch((cause) =>
+          this.deps.log.error("crew: process crashed", {
+            issue: k,
+            err: String(cause),
+          }),
+        )
+        .finally(() => this.inflight.delete(k));
     }
   }
 
