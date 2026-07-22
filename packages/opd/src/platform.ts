@@ -377,6 +377,12 @@ export class Platform {
                   ...(onEvent ? { onEvent } : {}),
                   ...(target ? { target } : {}),
                 });
+                // The console can only say "composer offline" — the WHY must
+                // land in the log or an intermittent failure is undiagnosable.
+                if (d.status === "error")
+                  log.warn("composer draft failed", {
+                    err: d.error.message.slice(0, 500),
+                  });
                 return d.status === "ok" ? d.value : null;
               }
             : null,
