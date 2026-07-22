@@ -215,7 +215,12 @@ export async function draftIssue(opts: {
         model: MODEL,
         systemPrompt: system,
         allowedTools: [],
-        maxTurns: 4, // the structured-output tool call + finalize
+        // Adaptive thinking can spend several turns before the structured-
+        // output call; 4 lost that race intermittently ("Reached maximum
+        // number of turns") and the console degraded to "no spec". There are
+        // no tools to loop on, so the only runaway guard needed is the
+        // deadline — the cap is just insurance.
+        maxTurns: 12,
         permissionMode: "bypassPermissions",
         settingSources: [], // skip ~/.claude — a real latency tax
         thinking: { type: "adaptive" }, // think for correctness; the UI shows it
