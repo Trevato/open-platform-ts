@@ -421,6 +421,11 @@ export class GitHost {
         const r = await this.git(op, args);
         if (r.status === "error") return r as Result<never, GitError>;
       }
+      // A merge IS a push to base — but it lands via a local-path push, which
+      // bypasses the smart-HTTP receive-pack that normally emits the event.
+      // Without this, a console Merge on plat/platform never hot-reloads and
+      // one on plat/opd never triggers the supervised self-upgrade.
+      this.emitPush({ owner, name });
       return Result.ok(undefined);
     } catch (cause) {
       return Result.err(new GitError({ message: String(cause), op }));

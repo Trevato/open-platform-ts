@@ -48,7 +48,9 @@ cd opd-src && bun install
 OP_SRC=$PWD op up
 ```
 
-Now a push to `plat/opd` asks the daemon to upgrade
+Now a merge to `plat/opd` — the console's Merge button or a direct push;
+both fire the push event (`packages/git/src/githost.ts:428`) — asks the
+daemon to upgrade
 (`packages/opd/src/platform.ts:501`): it stops cleanly and exits with the
 upgrade code; the supervisor pulls the new source into `OP_SRC` and
 re-execs. If the new daemon fails to stay up, the supervisor resets the

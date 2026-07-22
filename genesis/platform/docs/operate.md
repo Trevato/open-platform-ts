@@ -45,9 +45,10 @@ git clone https://<your-domain>/plat/platform.git
 git commit -am "ops: raise app memory cap" && git push
 ```
 
-The push triggers a reload and then a full re-converge, so a raised memory
-cap reaches already-running apps without another push
-(`packages/opd/src/platform.ts:493`). Crew prompts are even more direct:
+The push — or a console Merge of a crew-proposed change; both fire the push
+event (`packages/git/src/githost.ts:428`) — triggers a reload and then a
+full re-converge, so a raised memory cap reaches already-running apps
+without another push (`packages/opd/src/platform.ts:493`). Crew prompts are even more direct:
 `crew/<role>/instructions.md` and `crew/<role>/skills/*.md` are read fresh
 from git for every job, so an edited prompt applies to the next run
 (`packages/opd/src/platform-config.ts:184`). Docs work the same way — see

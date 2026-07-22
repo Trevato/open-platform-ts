@@ -452,4 +452,42 @@ describe("handleSmartHttp", () => {
       server.stop(true);
     }
   });
+
+  test("mergeBranch emits a push event (a merge IS a push to base)", async () => {
+    // Console merges land via a local-path push, bypassing receive-pack — the
+    // event must fire anyway, or a merged plat/platform change never
+    // hot-reloads and a merged plat/opd change never self-upgrades.
+    const { sd, host } = freshHost();
+    const src = join(scratch(), "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "f.txt"), "v1\n");
+    Result.unwrap(await host.initBareRepo("ada", "app"));
+    Result.unwrap(await host.seedRepoFromDir("ada", "app", src, "init"));
+
+    // A feature branch in the bare repo, made the boring way: clone → commit
+    // → push (local path — deliberately NOT the event-emitting HTTP path).
+    const work = join(scratch(), "w");
+    await sh(scratch(), ["git", "clone", repoPath(sd, "ada", "app"), work]);
+    await sh(work, ["git", "checkout", "-b", "feature"]);
+    writeFileSync(join(work, "f.txt"), "v2\n");
+    await sh(work, ["git", "add", "-A"]);
+    await sh(work, [
+      "git",
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-m",
+      "change",
+    ]);
+    await sh(work, ["git", "push", "-q", "origin", "feature:feature"]);
+
+    const events: PushEvent[] = [];
+    host.onPush((e) => events.push(e));
+    Result.unwrap(
+      await host.mergeBranch("ada", "app", "main", "feature", "merge it"),
+    );
+    expect(events).toEqual([{ owner: "ada", name: "app" }]);
+  });
 });
