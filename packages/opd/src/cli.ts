@@ -52,13 +52,16 @@ function card(p: Platform): void {
 `);
 }
 
-// The daemon: boot, print the card, serve forever. When its own source
-// (plat/opd) changes under a supervisor, it asks for a re-exec by exiting
-// UPGRADE_EXIT. Unsupervised, exiting would just kill the platform with
-// nothing to restart it — so the daemon keeps serving the old code and the
-// merge applies on the next (ideally supervised) boot. Apps outlive it.
+// The daemon: boot, print the card, serve forever.
+//
+// App-container lifecycle, by how the daemon goes away:
+//  • self-upgrade re-exec (supervised) or a crash → apps OUTLIVE it
+//    (`--restart=always`); the re-exec/reboot must not blip them.
+//  • operator shutdown (Ctrl-C / SIGTERM) → apps are stopped too, so
+//    "stop the platform" leaves no orphan containers running. A later
+//    `op up` reconciles everything back from `sys/gitops`.
 async function serve(domain: string): Promise<number> {
-  let upgrading = false;
+  let leaving = false;
   let booted: Platform | undefined;
   const supervised = process.env["OP_SUPERVISED"] === "1";
   const opts: PlatformOpts = {
@@ -66,15 +69,15 @@ async function serve(domain: string): Promise<number> {
     ...(supervised
       ? {
           onUpgradeRequested: () => {
-            if (upgrading) return;
-            upgrading = true;
+            if (leaving) return;
+            leaving = true;
             void (async () => {
               // Grace: the event that requested this often fires at the tail
               // of an API call (a console Merge) — let its response flush
               // before the gate goes down, or the user sees a network error
-              // for a merge that succeeded.
+              // for a merge that succeeded. Keep the apps up across the re-exec.
               await Bun.sleep(500);
-              await booted?.stop().catch(() => {});
+              await booted?.stop({ teardownApps: false }).catch(() => {});
               process.exit(UPGRADE_EXIT);
             })();
           },
@@ -89,6 +92,16 @@ async function serve(domain: string): Promise<number> {
     return 1;
   }
   booted = result.value;
+  // Operator shutdown → take the apps down with the platform (no orphans).
+  for (const sig of ["SIGINT", "SIGTERM"] as const)
+    process.on(sig, () => {
+      if (leaving) return;
+      leaving = true;
+      void (async () => {
+        await booted?.stop({ teardownApps: true }).catch(() => {});
+        process.exit(0);
+      })();
+    });
   card(booted);
   await new Promise(() => {}); // serve forever
   return 0;

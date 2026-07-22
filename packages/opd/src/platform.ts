@@ -987,12 +987,36 @@ export class Platform {
     return "tarball";
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stop the daemon. Apps run under Docker with `--restart=always`, so by
+   * default they OUTLIVE this (a crash or a self-upgrade re-exec must not blip
+   * them — that is the reliability contract). Pass `teardownApps` for a genuine
+   * operator shutdown (Ctrl-C / SIGTERM): the app containers are stopped too,
+   * so "stop the platform" also stops its apps and leaves no orphans running.
+   * A later `op up` reconciles them all back from `sys/gitops`.
+   */
+  async stop(opts?: { teardownApps?: boolean }): Promise<void> {
     this.dispatcher?.stop();
     this.gate.stop();
     this.tcpGate.stop();
     await this.sourceHosting; // never rejects (Result-typed inside)
     await this.reconciler.stop(); // drain in-flight passes before the store closes
+    if (opts?.teardownApps) {
+      const running = await this.engine.listPlatformContainers(this.platformId);
+      if (running.status === "ok")
+        for (const c of running.value) {
+          const removed = await this.engine.stopAndRemove(c.id);
+          if (removed.status === "error")
+            this.log.warn("app container not stopped on shutdown", {
+              id: c.id.slice(0, 12),
+              err: removed.error.message,
+            });
+        }
+      else
+        this.log.warn("could not list app containers to stop on shutdown", {
+          err: running.error.message,
+        });
+    }
     this.store.close();
   }
 }

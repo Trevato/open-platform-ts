@@ -81,3 +81,22 @@ via [environment variables](/docs/env) (`DOMAIN`, `HTTP_PORT`, `HTTPS_PORT`)
 and a restart. The platform's own source is a separate repo, `plat/opd`,
 where a merge requests a supervised re-exec — see
 [self-sourcing](/docs/self-source).
+
+## Stopping the platform, and what happens to apps
+
+App containers run with Docker's `--restart=always`, so their lifecycle is
+tied to _how_ the daemon goes away
+(`packages/opd/src/cli.ts:63`):
+
+- **A crash or a self-upgrade re-exec → apps keep running.** A blip in the
+  daemon must not take your apps down; the re-exec (or a host reboot's
+  Docker restart) leaves them serving and reconciles them on the way back
+  up (`packages/opd/src/cli.ts:80`, `teardownApps: false`).
+- **An operator shutdown (Ctrl-C / `SIGTERM`) → apps stop too.** Stopping
+  the platform stops its apps, so you never accumulate a mess of orphan
+  containers from platforms that are no longer running
+  (`packages/opd/src/cli.ts:96`). A later `op up` brings everything back —
+  the reconciler recreates each app from `sys/gitops`.
+
+The teardown is scoped to _this_ platform's containers (the `op.platform`
+label), so stopping one platform never touches another's apps.
