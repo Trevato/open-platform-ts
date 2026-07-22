@@ -72,9 +72,36 @@ export class Dispatcher {
 
   /** Crash recovery: work stranded mid-flight by a daemon restart. Builds
    *  restart from queued (park → re-queue keeps the ledger honest); an item
-   *  already in review resumes its review loop against the live preview. */
+   *  already in review resumes its review loop against the live preview; a
+   *  merge whose bookkeeping the restart cut short is finished from git. */
   private sweepStranded(): void {
     const { store } = this.deps;
+    // A self-repo merge stops THIS daemon (self-upgrade): the git merge can
+    // land while the shipped/closed writes die with the process. Git is the
+    // truth — a parked item whose branch is already an ancestor of main was
+    // merged; finish its ledger here.
+    for (const item of store.listWorkByPhase("parked")) {
+      if (item.change_state !== "open" || !item.head_ref) continue;
+      void this.deps.git
+        .isAncestor(
+          item.owner,
+          item.repo,
+          item.head_ref,
+          item.base_ref ?? "main",
+        )
+        .then((merged) => {
+          if (!merged) return;
+          store.setWorkPhase(item.owner, item.repo, item.number, "shipped");
+          store.setChangeState(item.owner, item.repo, item.number, "merged");
+          this.comment(
+            item,
+            "🚀 The merge landed just as the platform restarted (a self-upgrade does exactly that); the ledger is now caught up. Work item closed.",
+          );
+          this.deps.log.info("crew: repaired interrupted merge", {
+            issue: this.key(item),
+          });
+        });
+    }
     for (const phase of ["building", "reworking"] as const) {
       for (const item of store.listWorkByPhase(phase)) {
         store.setWorkPhase(item.owner, item.repo, item.number, "parked", {

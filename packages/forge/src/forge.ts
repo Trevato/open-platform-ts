@@ -571,6 +571,10 @@ export class Forge {
       );
     }
     this.store.setChangeState(owner, repo, number, "merged");
+    // The push event LAST: on plat/opd a subscriber stops the daemon for the
+    // self-upgrade, and anything not yet written here would be lost — the
+    // ledger must already say shipped/merged when it fires.
+    this.git.firePushEvent(owner, repo);
     return Result.ok(this.store.getIssue(owner, repo, number)!);
   }
 
@@ -768,6 +772,8 @@ export class Forge {
         new ForgeError({ message: merged.error.message, code: "invalid" }),
       );
     this.store.setPrState(owner, repo, number, "merged");
+    // After the bookkeeping, same as mergeWork — see firePushEvent's contract.
+    this.git.firePushEvent(owner, repo);
     return Result.ok({ ...pr, state: "merged" });
   }
 

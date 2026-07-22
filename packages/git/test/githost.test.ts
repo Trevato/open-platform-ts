@@ -453,10 +453,12 @@ describe("handleSmartHttp", () => {
     }
   });
 
-  test("mergeBranch emits a push event (a merge IS a push to base)", async () => {
+  test("mergeBranch is silent; firePushEvent announces the merge (after caller bookkeeping)", async () => {
     // Console merges land via a local-path push, bypassing receive-pack — the
     // event must fire anyway, or a merged plat/platform change never
-    // hot-reloads and a merged plat/opd change never self-upgrades.
+    // hot-reloads and a merged plat/opd change never self-upgrades. But NOT
+    // from inside mergeBranch: a plat/opd subscriber stops the daemon, so the
+    // forge fires it only after its ledger writes are durable.
     const { sd, host } = freshHost();
     const src = join(scratch(), "src");
     mkdirSync(src, { recursive: true });
@@ -488,6 +490,43 @@ describe("handleSmartHttp", () => {
     Result.unwrap(
       await host.mergeBranch("ada", "app", "main", "feature", "merge it"),
     );
+    expect(events).toEqual([]); // silent — the caller announces when ready
+    host.firePushEvent("ada", "app");
     expect(events).toEqual([{ owner: "ada", name: "app" }]);
+  });
+
+  test("isAncestor: merged branch reads true, unmerged false, garbage false", async () => {
+    const { sd, host } = freshHost();
+    const src = join(scratch(), "asrc");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "f.txt"), "v1\n");
+    Result.unwrap(await host.initBareRepo("ada", "anc"));
+    Result.unwrap(await host.seedRepoFromDir("ada", "anc", src, "init"));
+    const work = join(scratch(), "aw");
+    await sh(scratch(), ["git", "clone", repoPath(sd, "ada", "anc"), work]);
+    await sh(work, ["git", "checkout", "-b", "feature"]);
+    writeFileSync(join(work, "f.txt"), "v2\n");
+    await sh(work, ["git", "add", "-A"]);
+    await sh(work, [
+      "git",
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-m",
+      "c",
+    ]);
+    await sh(work, ["git", "push", "-q", "origin", "feature:feature"]);
+
+    expect(await host.isAncestor("ada", "anc", "feature", "main")).toBe(false);
+    Result.unwrap(await host.mergeBranch("ada", "anc", "main", "feature", "m"));
+    expect(await host.isAncestor("ada", "anc", "feature", "main")).toBe(true);
+    expect(await host.isAncestor("ada", "anc", "no-such-ref", "main")).toBe(
+      false,
+    );
+    expect(
+      await host.isAncestor("ada", "missing-repo", "feature", "main"),
+    ).toBe(false);
   });
 });

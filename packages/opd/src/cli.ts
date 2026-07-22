@@ -69,6 +69,11 @@ async function serve(domain: string): Promise<number> {
             if (upgrading) return;
             upgrading = true;
             void (async () => {
+              // Grace: the event that requested this often fires at the tail
+              // of an API call (a console Merge) — let its response flush
+              // before the gate goes down, or the user sees a network error
+              // for a merge that succeeded.
+              await Bun.sleep(500);
               await booted?.stop().catch(() => {});
               process.exit(UPGRADE_EXIT);
             })();

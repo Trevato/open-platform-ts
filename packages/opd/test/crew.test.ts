@@ -592,6 +592,17 @@ describe("dispatcher", () => {
     expect(issue.change_state).toBe("open"); // proposed, NOT auto-merged (human gate)
     expect(issue.phase).toBe("parked");
     expect(issue.parked_reason).toBe("self-repo-human-merge");
+
+    // The human-gate Merge: the push event (which on plat/opd stops the
+    // daemon for self-upgrade) must fire only AFTER the ledger says
+    // shipped/merged — anything later than the event can die with the process.
+    let atEvent: { phase: string; change: string | null } | null = null;
+    h.git.onPush(() => {
+      const i = h.store.getIssue("plat", "platform", 1)!;
+      atEvent = { phase: i.phase, change: i.change_state };
+    });
+    Result.unwrap(await h.forge.mergeWork(h.admin, "plat", "platform", 1));
+    expect(atEvent as unknown).toEqual({ phase: "shipped", change: "merged" });
     const comments = h.store
       .listComments("plat", "platform", 1)
       .map((c) => c.body)
@@ -671,6 +682,63 @@ describe("dispatcher", () => {
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("template every future app starts from");
+  });
+
+  test("sweepStranded finishes a merge whose bookkeeping a restart cut short", async () => {
+    const h = await harness();
+    const seed = await mkdtemp(join(tmpdir(), "op-plat-"));
+    dirs.push(seed);
+    await writeFile(join(seed, "platform.json"), "{}\n");
+    Result.unwrap(await h.forge.createRepo(h.admin, "plat", "platform"));
+    Result.unwrap(
+      await h.git.seedRepoFromDir("plat", "platform", seed, "init"),
+    );
+    const configAgent: RunAgent = async (run) => {
+      await mkdir(join(run.cwd, "crew"), { recursive: true });
+      await writeFile(join(run.cwd, "crew", "b.md"), "tweak\n");
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    };
+    const d = new Dispatcher(dispatcherReviewDeps(h, configAgent));
+    fileWork(h, "platform", { title: "tweak", body: "b" });
+    await d.tick();
+    await settle(h, 1, 20_000, "platform"); // parked, change open
+
+    // Simulate the interrupted merge: git merged, ledger writes lost.
+    Result.unwrap(
+      await h.git.mergeBranch(
+        "plat",
+        "platform",
+        "main",
+        "agent/issue-1",
+        "merge",
+      ),
+    );
+    expect(h.store.getIssue("plat", "platform", 1)!.phase).toBe("parked");
+
+    // The next boot's sweep reads git as the truth and catches the ledger up.
+    const d2 = new Dispatcher(dispatcherReviewDeps(h, null));
+    d2.start(600_000);
+    const t0 = performance.now();
+    while (
+      h.store.getIssue("plat", "platform", 1)!.phase !== "shipped" &&
+      performance.now() - t0 < 10_000
+    )
+      await Bun.sleep(25);
+    d2.stop();
+    const repaired = h.store.getIssue("plat", "platform", 1)!;
+    expect(repaired.phase).toBe("shipped");
+    expect(repaired.change_state).toBe("merged");
+    expect(repaired.state).toBe("closed");
+    const comments = h.store
+      .listComments("plat", "platform", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("ledger is now caught up");
   });
 
   test("without a credential, stays queued and does not build (no stale comment)", async () => {

@@ -62,15 +62,15 @@ count. [How a request becomes software](/docs/how-it-builds) walks the loop.
 Declare "blocked by" edges with full coordinates — `{on: "owner/repo#3"}`.
 Edges may cross repos but not owners, and self-edges and cycles are rejected
 at add time, so the graph is always a DAG
-(`packages/forge/src/forge.ts:609`). The dispatcher skips a queued item while
+(`packages/forge/src/forge.ts:613`). The dispatcher skips a queued item while
 any blocker is in a non-terminal phase
-(`packages/opd/src/crew/dispatcher.ts:123`); when the blocker ships, the next
+(`packages/opd/src/crew/dispatcher.ts:145`); when the blocker ships, the next
 tick picks it up.
 
 ## Parked reasons
 
 The crew parks an item when it needs you, stamping a machine-readable reason
-(`packages/opd/src/crew/dispatcher.ts:434`):
+(`packages/opd/src/crew/dispatcher.ts:461`):
 
 | Reason                  | What happened                                                                                   |
 | ----------------------- | ----------------------------------------------------------------------------------------------- |

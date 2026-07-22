@@ -82,6 +82,15 @@ export class GitHost {
     this.pushSubs.push(cb);
   }
 
+  /** Announce a ref change that landed via a local-path push (a forge merge),
+   *  which bypasses the receive-pack that normally emits the event. Callers
+   *  fire this only AFTER their own bookkeeping is durable — a subscriber may
+   *  stop the daemon (plat/opd → self-upgrade), and anything unwritten when
+   *  it fires is lost. */
+  firePushEvent(owner: string, name: string): void {
+    this.emitPush({ owner, name });
+  }
+
   private emitPush(evt: PushEvent): void {
     for (const cb of this.pushSubs) {
       try {
@@ -274,6 +283,28 @@ export class GitHost {
     return new Response("not found", { status: 404, headers: NO_CACHE });
   }
 
+  /** True when `ref` is already reachable from `of` — i.e. its commits are
+   *  merged. Used by the crash-repair sweep to recognize a merge whose
+   *  bookkeeping was cut short by a restart. Any git failure (bad ref,
+   *  missing repo) reads as false: the caller repairs nothing rather than
+   *  guessing. */
+  async isAncestor(
+    owner: string,
+    name: string,
+    ref: string,
+    of = "main",
+  ): Promise<boolean> {
+    const dir = this.dir("isAncestor", owner, name);
+    if (dir.status === "error") return false;
+    if (ref.startsWith("-") || of.startsWith("-")) return false;
+    const r = await this.git(
+      "isAncestor",
+      ["merge-base", "--is-ancestor", ref, of],
+      { cwd: dir.value },
+    );
+    return r.status === "ok";
+  }
+
   async headSha(
     owner: string,
     name: string,
@@ -421,11 +452,10 @@ export class GitHost {
         const r = await this.git(op, args);
         if (r.status === "error") return r as Result<never, GitError>;
       }
-      // A merge IS a push to base — but it lands via a local-path push, which
-      // bypasses the smart-HTTP receive-pack that normally emits the event.
-      // Without this, a console Merge on plat/platform never hot-reloads and
-      // one on plat/opd never triggers the supervised self-upgrade.
-      this.emitPush({ owner, name });
+      // No emitPush here, deliberately: a merge IS a push to base, but the
+      // event can stop the daemon (plat/opd → self-upgrade), so it must fire
+      // only after the CALLER's bookkeeping is durable — see
+      // Forge.mergeWork/mergePr, which call firePushEvent as their last step.
       return Result.ok(undefined);
     } catch (cause) {
       return Result.err(new GitError({ message: String(cause), op }));

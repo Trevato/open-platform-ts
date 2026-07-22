@@ -47,7 +47,7 @@ intact. The acceptance criteria are explicit
 ## The importer role
 
 The dispatcher routes `agent-import` items to the `importer` crew role
-instead of the builder (`packages/opd/src/crew/dispatcher.ts:469`). Its
+instead of the builder (`packages/opd/src/crew/dispatcher.ts:497`). Its
 instructions are the inverse of a feature build: adapt someone else's
 project — any language, any framework — with the smallest possible diff, and
 never rewrite (`genesis/platform/crew/importer/instructions.md:5`). The
@@ -70,7 +70,7 @@ is left as clearly stated partial progress rather than a faked deploy
 (`genesis/platform/crew/importer/instructions.md:37`). The item then parks —
 as it also does for a failed build, a preview that never comes up, or an
 exhausted rework budget — and waits for a human
-(`packages/opd/src/crew/dispatcher.ts:439`).
+(`packages/opd/src/crew/dispatcher.ts:466`).
 
 Parked items head the crew queue at `GET /api/v1/crew` and the `/crew` page
 (`packages/opd/src/api.ts:1079`). The change branch is left in place, so you

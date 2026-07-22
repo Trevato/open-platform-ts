@@ -49,7 +49,7 @@ OP_SRC=$PWD op up
 ```
 
 Now a merge to `plat/opd` — the console's Merge button or a direct push;
-both fire the push event (`packages/git/src/githost.ts:428`) — asks the
+both fire the push event (`packages/forge/src/forge.ts:577`) — asks the
 daemon to upgrade
 (`packages/opd/src/platform.ts:501`): it stops cleanly and exits with the
 upgrade code; the supervisor pulls the new source into `OP_SRC` and
@@ -64,10 +64,17 @@ with nothing to restart it would just kill the platform
 (`packages/opd/src/platform.ts:505`). The merge applies on the next boot,
 ideally a supervised one.
 
+The upgrade exit races the merge's own paperwork by nature. The event fires
+only after the ledger says shipped (`packages/forge/src/forge.ts:577`), and
+if a restart still cuts the writes short, the next boot's sweep reads git as
+the truth and catches the ledger up
+(`packages/opd/src/crew/dispatcher.ts:83`) — a merged branch never shows as
+an open change for long.
+
 ## The platform-dev role
 
 Work filed on a self-repo is picked up by the `platform-dev` role instead
-of the app builder (`packages/opd/src/crew/dispatcher.ts:467`) — a prompt
+of the app builder (`packages/opd/src/crew/dispatcher.ts:495`) — a prompt
 tuned to the daemon's strict-TypeScript, errors-as-values codebase. The
 checkout has no `node_modules`, so the agent cannot run `bun` or `tsc`
 (`genesis/platform/crew/platform-dev/instructions.md:13`); its code must be
@@ -77,15 +84,15 @@ An agent that finds the issue mis-scoped — config work filed on the source
 repo, daemon work filed on config — doesn't guess: it invokes the decline
 contract (`packages/opd/src/crew/builder.ts:151`) and the item parks with
 the agent's own explanation of where the work belongs
-(`packages/opd/src/crew/dispatcher.ts:202`). Edit the issue, or re-file it
+(`packages/opd/src/crew/dispatcher.ts:229`). Edit the issue, or re-file it
 on the right repo, and Re-queue.
 
 > [!warning]
 > Self-repos never auto-merge. The crew parks the finished branch as a
 > proposed change — no preview, no reviewer verdict, no ship
-> (`packages/opd/src/crew/dispatcher.ts:219`). A human reads the diff and
+> (`packages/opd/src/crew/dispatcher.ts:246`). A human reads the diff and
 > presses Merge. The same gate covers `plat/app-template`
-> (`packages/opd/src/crew/dispatcher.ts:235`) — a template merge shapes
+> (`packages/opd/src/crew/dispatcher.ts:262`) — a template merge shapes
 > every future app. The [crew](/docs/crew) can rewrite the platform, but
 > only a person can make it so.
 

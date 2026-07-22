@@ -74,7 +74,7 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-… op up
 ```
 
 Without it the platform degrades gracefully: everything else works, and queued
-agent-work simply waits (`packages/opd/src/crew/dispatcher.ts:128`). The header
+agent-work simply waits (`packages/opd/src/crew/dispatcher.ts:154`). The header
 crew pill shows the live truth — "crew needs a token — N waiting" — computed
 from `/api/v1/crew`'s `credentialed` flag, so it clears the moment you set the
 token; nothing stale lingers in a work item's feed. The composer likewise
@@ -86,14 +86,14 @@ Crew tunables live in `platform.json` in `plat/platform` and hot-reload on
 push — defaults are `maxRework: 2`, `sweepMs: 30000`, `model:
 "claude-sonnet-5"` (`packages/opd/src/platform-config.ts:44`). The model is
 passed into every builder and reviewer run
-(`packages/opd/src/crew/dispatcher.ts:473`); the composer uses a fast model
+(`packages/opd/src/crew/dispatcher.ts:500`); the composer uses a fast model
 (`claude-haiku-4-5`) independently.
 
 On a failing verdict the builder reworks the same branch, up to
 `crew.maxRework` times; exhaustion parks the item for you
-(`packages/opd/src/crew/dispatcher.ts:378`). Every attempt posts its real
+(`packages/opd/src/crew/dispatcher.ts:405`). Every attempt posts its real
 inference cost as a comment on the work item
-(`packages/opd/src/crew/dispatcher.ts:250`), so a work item's feed doubles
+(`packages/opd/src/crew/dispatcher.ts:277`), so a work item's feed doubles
 as its bill.
 
 > [!tip]
