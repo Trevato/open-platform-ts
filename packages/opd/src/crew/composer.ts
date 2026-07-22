@@ -202,7 +202,12 @@ export async function draftIssue(opts: {
   const emit = opts.onEvent;
 
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), opts.deadlineMs ?? 30_000);
+  // The SDK path pays a subprocess cold start plus adaptive thinking — on a
+  // platform-source draft that can pass 30s, and an abort mid-draft reads as
+  // "no spec generated". The console streams the reasoning live, so a longer
+  // ceiling costs nothing when the run finishes sooner. (The raw-API fast
+  // lane below keeps its tight deadline — it answers in seconds.)
+  const timer = setTimeout(() => abort.abort(), opts.deadlineMs ?? 90_000);
   try {
     const q = run({
       prompt,

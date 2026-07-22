@@ -896,12 +896,26 @@ function renderDraft(idea,d,degraded){
     '<div class="card pad stack mt-s'+(degraded?' warn':'')+'">'+
     '<div><div class="label mb">Title</div><input type="text" id="d-title" class="grow" value="'+escHtml(d.title||idea)+'"></div>'+
     '<div><div class="label mb">Spec</div><textarea id="d-body" rows="7"'+ph+'>'+escHtml(spec)+'</textarea></div>'+
-    '<div class="row"><span class="label">Labels</span><span id="d-labels">'+labels.map(function(l){return '<span class="pill agent chip rm" data-l="'+escHtml(l)+'" onclick="this.remove()">'+escHtml(l)+' ×</span>'}).join(' ')+'</span></div>'+
+    '<div class="row"><span class="label">Labels</span><span id="d-labels">'+labels.map(function(l){return '<span class="pill agent chip rm" data-l="'+escHtml(l)+'" onclick="this.remove()">'+escHtml(l)+' ×</span>'}).join(' ')+'</span>'+
+    '<input type="text" id="d-addlabel" size="12" placeholder="+ label" onkeydown="if(event.key===\\'Enter\\'){event.preventDefault();addLabel()}"></div>'+
     '<div class="row"><button onclick="fileDraft(this)">File issue</button><button class="btn ghost" onclick="rewrite()">Rewrite</button><span class="mut" style="font-size:12px">'+note+'</span></div>'+
     '</div>';
   if(degraded){var t=document.getElementById('d-body');if(t)t.focus();}
 }
+// Chips are removable, so they must be addable too — losing agent-work to a
+// stray click (it queues the crew) would otherwise be a one-way door.
+function addLabel(){
+  var inp=document.getElementById('d-addlabel');if(!inp)return;
+  var l=inp.value.trim().toLowerCase();inp.value='';
+  if(!/^[a-z0-9][a-z0-9:._-]{0,63}$/.test(l))return;
+  if(document.querySelector('#d-labels [data-l="'+l.replace(/"/g,'')+'"]'))return;
+  var s=document.createElement('span');s.className='pill agent chip rm';s.dataset.l=l;
+  s.onclick=function(){s.remove()};s.textContent=l+' ×';
+  document.getElementById('d-labels').appendChild(document.createTextNode(' '));
+  document.getElementById('d-labels').appendChild(s);
+}
 async function fileDraft(b){
+  addLabel(); // a typed-but-unentered label still counts
   var title=document.getElementById('d-title').value.trim();var body=document.getElementById('d-body').value.trim();
   var labels=[].map.call(document.querySelectorAll('#d-labels [data-l]'),function(x){return x.dataset.l});
   b.classList.add('is-loading');b.disabled=true;await fileIssue(title,body,labels);
