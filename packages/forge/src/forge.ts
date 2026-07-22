@@ -351,17 +351,27 @@ export class Forge {
         }),
       );
     }
-    // createRepo enforces canWriteOwner(actor, owner) — an org owner is allowed
-    // only for members. Keep the git-side owner in lock-step with the repo row.
-    const created = await this.createRepo(actor, owner, name);
-    if (created.status === "error") return created as Result<never, ForgeError>;
+    // Auth up front (createRepo re-checks, but we run git BEFORE it now, so
+    // guard here to avoid materializing an orphan git repo on a denied create).
+    if (!this.canWriteOwner(actor, owner))
+      return Result.err(
+        new ForgeError({
+          message: `${actor.username} may not create repos under ${owner}`,
+          code: "unauthorized",
+        }),
+      );
+    // Populate the git repo (init + clone template content) BEFORE the store
+    // row exists. The store row is what makes a repo visible to the crew
+    // dispatcher (`getRepo` gate); creating it last means `getRepo(...)=true`
+    // implies a clonable, populated repo — so a work item filed concurrently
+    // with app creation can never be claimed and fail to clone an empty repo.
+    // (initBareRepo is idempotent, so createRepo's own init is a no-op here.)
     const gen = await this.git.createFromTemplate(tpl, owner, name);
-    if (gen.status === "error") {
+    if (gen.status === "error")
       return Result.err(
         new ForgeError({ message: gen.error.message, code: "invalid" }),
       );
-    }
-    return created;
+    return this.createRepo(actor, owner, name);
   }
 
   // ── work items ──────────────────────────────────────────────────────────
@@ -518,9 +528,29 @@ export class Forge {
     try {
       this.store.setWorkPhase(owner, repo, number, "reviewing");
     } catch (cause) {
-      return Result.err(
-        new ForgeError({ message: String(cause), code: "invalid" }),
-      );
+      // Self-heal a phase drift: under heavy concurrency a building item has
+      // been observed back at `queued` by the time its build finishes (see the
+      // phase-race note). We own this item and hold a real built change, so
+      // rather than lose the work, re-assert the claim (queued → building) and
+      // retry the move to reviewing. Any other unexpected phase is a genuine
+      // error.
+      const cur = this.store.getIssue(owner, repo, number);
+      if (
+        cur?.phase === "queued" &&
+        this.store.claimWork(owner, repo, number)
+      ) {
+        try {
+          this.store.setWorkPhase(owner, repo, number, "reviewing");
+        } catch (retryCause) {
+          return Result.err(
+            new ForgeError({ message: String(retryCause), code: "invalid" }),
+          );
+        }
+      } else {
+        return Result.err(
+          new ForgeError({ message: String(cause), code: "invalid" }),
+        );
+      }
     }
     return Result.ok(this.store.getIssue(owner, repo, number)!);
   }

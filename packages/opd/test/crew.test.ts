@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLog, Result, stateDir } from "@op/core";
+import { createLog, repoPath, Result, stateDir } from "@op/core";
 import type { RunAgent } from "@op/crew";
 import { Forge } from "@op/forge";
 import { GitHost } from "@op/git";
@@ -152,6 +152,34 @@ function builderDeps(
     log: createLog("crew"),
   };
 }
+
+describe("attachChange self-heal", () => {
+  test("a built change on a phase-drifted (queued) item is preserved: re-claim → reviewing", async () => {
+    const h = await harness();
+    // Make a real branch to attach (attachChange verifies both refs exist).
+    const bare = repoPath(h.sd, "plat", "app");
+    const b = Bun.spawn(
+      ["git", "-C", bare, "branch", "agent/issue-1", "main"],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    await b.exited;
+    // File the item and leave it at `queued` — the exact drift state a build
+    // has been observed to end in under heavy concurrency.
+    const issue = fileWork(h, "app", { title: "x", body: "b" });
+    expect(h.store.getIssue("plat", "app", issue.number)!.phase).toBe("queued");
+    const attached = await h.forge.attachChange(
+      h.admin,
+      "plat",
+      "app",
+      issue.number,
+      { head: "agent/issue-1" },
+    );
+    expect(attached.status).toBe("ok"); // change preserved, not lost
+    const row = h.store.getIssue("plat", "app", issue.number)!;
+    expect(row.phase).toBe("reviewing");
+    expect(row.change_state).toBe("open");
+  });
+});
 
 describe("builder", () => {
   test("clones, lets the agent edit, commits the backstop, pushes, attaches the change", async () => {
