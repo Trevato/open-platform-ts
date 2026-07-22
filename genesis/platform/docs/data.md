@@ -73,7 +73,7 @@ deletes the branch.
 
 `op app export <owner>/<app>` bundles the app's full git history, its
 manifest, and a fresh verified snapshot taken at export time
-(`packages/opd/src/platform.ts:648`). On the receiving platform, `op app
+(`packages/opd/src/platform.ts:707`). On the receiving platform, `op app
 import` lays the data down only if the app doesn't already have a live dir,
 and verifies the imported database before accepting it. Restoring a snapshot
 in place replaces the live directory wholesale

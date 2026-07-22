@@ -50,6 +50,39 @@ describe("composer draftIssue (SDK)", () => {
     expect(d.acceptanceChecks.length).toBe(2);
   });
 
+  test("target contracts: self-repos and templates get their own build contract, apps keep theirs", async () => {
+    const captured: string[] = [];
+    const capturing = ((args: { options?: { systemPrompt?: string } }) => {
+      captured.push(args.options?.systemPrompt ?? "");
+      async function* gen() {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: {
+            title: "t",
+            body: "b",
+            labels: [],
+            acceptanceChecks: [],
+          },
+        };
+      }
+      return gen();
+    }) as unknown as RunQuery;
+    await draftIssue({ ...opts(capturing), target: "platform-source" });
+    await draftIssue({ ...opts(capturing), target: "platform-config" });
+    await draftIssue({ ...opts(capturing), target: "template" });
+    await draftIssue(opts(capturing)); // default target = app
+    expect(captured[0]).toContain("plat/opd");
+    expect(captured[0]).toContain("PARKS FOR HUMAN REVIEW");
+    expect(captured[1]).toContain("plat/platform");
+    expect(captured[1]).toContain("platform.json");
+    expect(captured[2]).toContain("plat/app-template");
+    // The app contract survives target-awareness — the default draft still
+    // speaks single-file Bun + preview + auto-merge.
+    expect(captured[3]).toContain("single-file Bun + bun:sqlite");
+    expect(captured[3]).toContain("live preview");
+  });
+
   test("falls back to parsing text when there is no structured_output (tolerates fences)", async () => {
     const q = fakeQuery([
       {

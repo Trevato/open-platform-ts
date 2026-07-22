@@ -75,7 +75,9 @@ function stepper(phase: string, parkedReason: string | null): string {
     building = review = live = "done";
   } else if (phase === "parked") {
     const atBuild =
-      parkedReason === "build-failed" || parkedReason === "daemon-restarted";
+      parkedReason === "build-failed" ||
+      parkedReason === "daemon-restarted" ||
+      parkedReason === "declined";
     building = atBuild ? "failed" : "done";
     if (!atBuild) review = "failed";
   }
@@ -659,11 +661,13 @@ ${
       const cloneUrl = `${o}/${owner}/${app}.git`;
       const canWrite = deps.forge.authorize(user, owner, app, "write");
       // System/self repos (plat/opd source, plat/platform config, sys/gitops)
-      // are NOT deployed apps — they have no URL, image, deploys or logs. Show
-      // them as repos: identity + issues + PRs, none of the deploy chrome.
-      const isSelf = isSelfRepo(owner, app) || owner === "sys";
-      const role =
-        app === OPD.name
+      // and app templates are NOT deployed apps — no URL, image, deploys or
+      // logs. Show them as repos: identity + issues + PRs, no deploy chrome.
+      const isTemplate = repo.is_template === 1;
+      const isSelf = isSelfRepo(owner, app) || owner === "sys" || isTemplate;
+      const role = isTemplate
+        ? "app template"
+        : app === OPD.name
           ? "platform source"
           : app === PLAT.name
             ? "platform config"
@@ -721,7 +725,7 @@ ${
   ${
     canWrite
       ? `<form class="newapp" id="composer-form" onsubmit="return compose(event)">
-    <input type="text" id="idea" class="grow" placeholder="Tell me what to change — I'll build it, check it works, and make it live" required>
+    <input type="text" id="idea" class="grow" placeholder="${isSelf ? "Tell me what to change — I'll write it on a branch for your review" : "Tell me what to change — I'll build it, check it works, and make it live"}" required>
     <button type="submit" id="composebtn">Change it</button>
   </form>
   <div id="draft"></div>`
@@ -1188,27 +1192,30 @@ tick();setInterval(tick,2000);`,
 
     // ── platform ────────────────────────────────────────────────────────
     if (path === "/platform") {
-      // The Config repo (plat/platform) exists on every boot; the Source repo
-      // (plat/opd) only after `op host-source`. Don't link to a repo that isn't
-      // there — a germinated daughter that never hosted its source would get a
-      // dead "Not found" card otherwise.
-      const opdHosted = deps.store.getRepo(OPD.owner, OPD.name) !== null;
+      // The Config and Template repos exist on every boot; the Source repo
+      // (plat/opd) is published automatically at boot — "not hosted" here
+      // means that publish failed (no checkout AND no shipped tarball), so
+      // point at the manual repair. Hosted = the repo has real content, not
+      // merely a store row (a legacy failed publish could have left one).
+      const opdHosted =
+        deps.store.getRepo(OPD.owner, OPD.name) !== null &&
+        (await deps.git.headSha(OPD.owner, OPD.name, "main")).status === "ok";
       const sourceCard = opdHosted
         ? `<a class="card app" href="/apps/plat/opd">
   <div class="name">Source</div>
   <div class="host">plat/opd</div>
-  <p class="sub" style="margin:6px 0">The platform's own code. An issue here → the crew edits the daemon → self-upgrade applies it.</p>
+  <p class="sub" style="margin:6px 0">The platform's own code. An issue here → the crew writes the change → you review and merge.</p>
   <div class="foot"><span class="mut" id="ic-opd"></span><span>File an issue →</span></div>
 </a>`
         : `<div class="card app">
   <div class="name">Source</div>
   <div class="host">plat/opd</div>
-  <p class="sub" style="margin:6px 0">The platform's own code — not hosted here yet. Run <code>op host-source</code> to publish it, then the crew can edit the daemon.</p>
+  <p class="sub" style="margin:6px 0">The platform's own code — not hosted yet (the boot publish found no source). Run <code>op host-source &lt;checkout&gt;</code> to publish it, then the crew can edit the daemon.</p>
   <div class="foot"><span class="mut">not hosted</span></div>
 </div>`;
       const body = `
 <h1>Platform</h1>
-<p class="sub">Change the platform itself — file an issue and the crew builds it.</p>
+<p class="sub">Change the platform itself — file an issue and the crew writes the change; you review the diff and merge.</p>
 <div class="grid">
 ${sourceCard}
 <a class="card app" href="/apps/plat/platform">
@@ -1216,6 +1223,12 @@ ${sourceCard}
   <div class="host">plat/platform</div>
   <p class="sub" style="margin:6px 0">Crew prompts + settings. Merging hot-reloads it live, no restart.</p>
   <div class="foot"><span class="mut" id="ic-platform"></span><span>File an issue →</span></div>
+</a>
+<a class="card app" href="/apps/plat/app-template">
+  <div class="name">Template</div>
+  <div class="host">plat/app-template</div>
+  <p class="sub" style="margin:6px 0">Every new app starts from this repo. Merging changes future apps; existing apps are untouched.</p>
+  <div class="foot"><span class="mut" id="ic-template"></span><span>File an issue →</span></div>
 </a>
 </div>`;
       return page(
@@ -1233,7 +1246,8 @@ async function issueCount(repo,el){
   }catch(_){}
 }
 ${opdHosted ? "issueCount('plat/opd','ic-opd');" : ""}
-issueCount('plat/platform','ic-platform');`,
+issueCount('plat/platform','ic-platform');
+issueCount('plat/app-template','ic-template');`,
       );
     }
 

@@ -18,7 +18,7 @@ the console falls back to the copy in the platform's source checkout
 Docs rot when nothing holds them to the code. Two mechanisms hold these:
 
 - **Code references are links.** Inline code that names a repo path — like
-  `packages/opd/src/platform.ts:306` — is recognized by one shared grammar
+  `packages/opd/src/platform.ts:339` — is recognized by one shared grammar
   (`packages/opd/src/console/md.ts:55`) and linked into the platform's own
   hosted source with the exact lines highlighted. Docs never point at an
   external mirror; they point at the code your platform is running from.
@@ -80,7 +80,7 @@ data?" — it searches these pages first, checks your live state when the
 question is about your platform, reads the source when you ask how something
 is implemented, and cites what it used as links under the answer.
 
-The guide streams over `POST /api/v1/guide` (`packages/opd/src/api.ts:961`);
+The guide streams over `POST /api/v1/guide` (`packages/opd/src/api.ts:1020`);
 the conversation lives in your browser session and nothing persists
 server-side. Its instructions are a crew role like any other —
 `crew/guide/instructions.md` in `plat/platform`, hot-editable

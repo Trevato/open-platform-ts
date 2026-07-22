@@ -84,6 +84,23 @@ async function changedPaths(checkout: string): Promise<string[]> {
   return out ? out.split("\n") : [];
 }
 
+async function aheadOfMain(checkout: string): Promise<number> {
+  const p = Bun.spawn(
+    [
+      "git",
+      "-c",
+      "safe.directory=*",
+      "-C",
+      checkout,
+      "rev-list",
+      "--count",
+      "origin/main..HEAD",
+    ],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  return Number((await new Response(p.stdout).text()).trim() || "0");
+}
+
 async function revParse(checkout: string): Promise<string> {
   const p = Bun.spawn(
     ["git", "-c", "safe.directory=*", "-C", checkout, "rev-parse", "HEAD"],
@@ -126,6 +143,20 @@ export interface BuilderDeps {
   onProgress?: (line: string) => void;
 }
 
+// The mis-scope escape hatch, stated in the DRIVER prompt (not the role
+// instructions) so detection and contract version together: an agent that
+// can't correctly do the work in THIS repo declines instead of guessing, and
+// the dispatcher parks the item with the explanation instead of a cryptic
+// "produced no changes".
+const DECLINE_CONTRACT =
+  "If this issue cannot be correctly implemented in THIS repository — it is mis-scoped, belongs in a different repo, or needs a decision only a human can make — do NOT guess and do NOT commit anything. Instead end your final message with a line starting exactly `DECLINED: ` followed by a short explanation of why and where the work belongs.";
+
+/** The agent's decline note, if its final message invoked the contract. */
+function declineNote(finalText: string): string | undefined {
+  const m = finalText.match(/^DECLINED:[ \t]*([\s\S]+)/m);
+  return m ? m[1]!.trim() : undefined;
+}
+
 /**
  * Build the change described by a work item: clone → feature branch → the
  * agent edits + commits → the driver pushes + attaches the change (which
@@ -134,6 +165,9 @@ export interface BuilderDeps {
  * In rework mode (opts.rework), it checks out the EXISTING change branch and
  * hands the agent the reviewer's blockers to fix — a new commit on the same
  * branch re-triggers the preview + review. One change per item, ever.
+ *
+ * A `declined` result means the agent invoked the decline contract instead of
+ * committing: the note explains why, for the human who re-scopes the item.
  */
 export async function runBuilder(
   deps: BuilderDeps,
@@ -141,7 +175,7 @@ export async function runBuilder(
   opts: {
     rework?: { verdict: string; attempt: number };
   } = {},
-): Promise<Result<{ costUsd: number }, BuilderError>> {
+): Promise<Result<{ costUsd: number; declined?: string }, BuilderError>> {
   const fail = (step: string) => (cause: unknown) =>
     new BuilderError({ message: String(cause), step });
   const rework = opts.rework;
@@ -205,8 +239,8 @@ export async function runBuilder(
             "\n\n---\n\n",
           ),
           prompt: rework
-            ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers, keeping everything else working. Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.`
-            : "Read ISSUE.md and implement exactly what it asks in this repository, then commit your work locally with a clear message. Do not push; do not open a pull request.",
+            ? `Read ISSUE.md for the original spec. The adversarial reviewer FAILED your pull request with these blockers:\n\n${rework.verdict}\n\nFix EXACTLY these blockers, keeping everything else working. Read the current code first, make the smallest correct fix, then commit locally with a clear message. Do not push; do not open a pull request.\n\n${DECLINE_CONTRACT}`
+            : `Read ISSUE.md and implement exactly what it asks in this repository, then commit your work locally with a clear message. Do not push; do not open a pull request.\n\n${DECLINE_CONTRACT}`,
           oauthToken: deps.oauthToken,
           ...(deps.model ? { model: deps.model } : {}),
           allowedTools: BUILDER_ALLOWED_TOOLS,
@@ -261,35 +295,21 @@ export async function runBuilder(
           }
         }
 
-        // The agent changed nothing ⇒ fail loudly rather than push an empty
-        // change. Fresh build: no commits ahead of main. Rework: the branch
-        // head didn't move.
-        if (rework) {
-          if ((await revParse(checkout)) === headBefore)
-            throw new Error(
-              "rework produced no changes (reviewer would fail again)",
-            );
-        } else {
-          const revlist = Bun.spawn(
-            [
-              "git",
-              "-c",
-              "safe.directory=*",
-              "-C",
-              checkout,
-              "rev-list",
-              "--count",
-              "origin/main..HEAD",
-            ],
-            { stdout: "pipe", stderr: "ignore" },
+        // The agent changed nothing ⇒ either an explicit decline (surface the
+        // agent's own explanation) or a loud failure — never an empty change.
+        // Fresh build: no commits ahead of main. Rework: the head didn't move.
+        const noChanges = rework
+          ? (await revParse(checkout)) === headBefore
+          : (await aheadOfMain(checkout)) === 0;
+        if (noChanges) {
+          const declined = declineNote(run.value.result);
+          if (declined) return { costUsd: run.value.costUsd, declined };
+          const said = run.value.result.trim().slice(0, 200);
+          throw new Error(
+            rework
+              ? "rework produced no changes (reviewer would fail again)"
+              : `agent produced no changes${said ? ` — its final message: ${said}` : ""}`,
           );
-          const ahead = Number(
-            (await new Response(revlist.stdout).text()).trim() || "0",
-          );
-          if (ahead === 0)
-            throw new Error(
-              "agent produced no changes (no commits ahead of main)",
-            );
         }
 
         // Driver push (local bare path — no network credential). A fresh build

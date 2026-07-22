@@ -42,7 +42,7 @@ clear.
 `X-Plat-*` headers are the platform's identity channel to apps, so on every
 app-host request the gate first deletes anything a client sent under that
 prefix — it can only be a forgery attempt (`packages/gate/src/gate.ts:119`).
-Then it resolves who is calling (`packages/opd/src/platform.ts:411`): an
+Then it resolves who is calling (`packages/opd/src/platform.ts:448`): an
 app-to-app bearer token verified against the target host's audience, or your
 ordinary session. App tokens die here — the gate verifies them and translates
 the caller into a plain header; a token minted for one app verifies as

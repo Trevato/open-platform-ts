@@ -113,7 +113,7 @@ Stored at `apps/<owner>/<app>/app.json` in `sys/gitops`
 The shape is `AppSpec` (`packages/opd/src/policy.ts:10`); `admitSpec` is the
 only path to a deploy and fails closed (`packages/opd/src/policy.ts:21`). All
 six fields are required — the "defaults" below are what the platform stamps
-when it creates an app for you (`packages/opd/src/api.ts:222`).
+when it creates an app for you (`packages/opd/src/api.ts:268`).
 
 | Field           | Type    | Stamped default | Bounds                                       | What it does                                        |
 | --------------- | ------- | --------------- | -------------------------------------------- | --------------------------------------------------- |

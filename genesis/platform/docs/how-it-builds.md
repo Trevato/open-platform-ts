@@ -13,10 +13,10 @@ end to end — it is the thing you watch on a work item's page right after the
 
 There are two on-ramps. The dashboard's text box is the one-motion start:
 `POST /api/v1/onramp` names an app for you, deploys it, and files the first
-build in a single call (`packages/opd/src/api.ts:255`). On an app that
+build in a single call (`packages/opd/src/api.ts:301`). On an app that
 already exists, the composer turns a rough one-liner into an editable draft —
 title, spec, labels, acceptance checks — that you review and file yourself
-(`packages/opd/src/api.ts:788`).
+(`packages/opd/src/api.ts:834`).
 
 Either way the result is a [work item](/docs/work-items) carrying the
 `agent-work` label, which means it is born at phase `queued`
@@ -27,7 +27,7 @@ Either way the result is a [work item](/docs/work-items) carrying the
 The dispatcher sweeps queued items and claims one with a compare-and-swap, so
 two sweeps can never build the same item
 (`packages/store/src/index.ts:1014`). It clones the repo, cuts the branch
-`agent/issue-N` (`packages/opd/src/crew/builder.ts:162`), and runs the
+`agent/issue-N` (`packages/opd/src/crew/builder.ts:196`), and runs the
 builder agent inside a locked-down container that holds nothing but its
 inference token — no platform credentials, no way to push. The agent writes
 code and commits locally; the trusted driver outside the cage pushes the
@@ -59,7 +59,7 @@ final message ends in exactly one verdict line
 ## Ship or rework
 
 On a pass, the platform merges the change into `main` as the system actor
-(`packages/opd/src/crew/dispatcher.ts:313`); the merge redeploys production
+(`packages/opd/src/crew/dispatcher.ts:340`); the merge redeploys production
 and tears down the preview. On a fail, the builder reworks the same branch
 with the verdict line as its spec, waits for a fresh preview, and the
 reviewer goes again — up to `crew.maxRework` times, default 2
@@ -70,7 +70,7 @@ reviewer goes again — up to `crew.maxRework` times, default 2
 Anything the pipeline cannot finish is **parked** with a reason — build
 failed, preview never came up, untestable, rework exhausted — and waits on
 the `/crew` page. The work item's controls follow the legal phase edges
-(`packages/opd/src/console/index.ts:991-1007`): **Re-queue** sends it back to
+(`packages/opd/src/console/index.ts:995-1011`): **Re-queue** sends it back to
 the crew, **Merge** ships it anyway on your judgment, **Close** ends it.
 
 > [!note]
@@ -85,5 +85,5 @@ tool calls (sampled — at most one line every 18 seconds,
 `packages/opd/src/crew/heartbeat.ts:55`), verdict lines, and the pipeline
 stepper. Below it, **Attempts** lists one row per build-and-review round with
 the verdict and the model cost of each half in dollars
-(`packages/opd/src/console/index.ts:1016-1021`). Attempts are how the rework
+(`packages/opd/src/console/index.ts:1020-1025`). Attempts are how the rework
 budget is counted; costs are what that item actually spent.

@@ -55,6 +55,25 @@ await cp(join(ROOT, "genesis"), join(OUT, "genesis"), { recursive: true });
 await cp(join(ROOT, "README.md"), join(OUT, "README.md"));
 await cp(join(ROOT, "LICENSE"), join(OUT, "LICENSE"));
 
+// 3b) ship the platform's own source (tracked files only — git archive is the
+// allowlist) so an npm-installed platform can host plat/opd and edit itself.
+// Same trust story as the bin: the tarball IS the source the bin was built from.
+const archive = Bun.spawn(
+  [
+    "git",
+    "-C",
+    ROOT,
+    "archive",
+    "--format=tar.gz",
+    "-o",
+    join(OUT, "source.tar.gz"),
+    "HEAD",
+  ],
+  { stdout: "inherit", stderr: "inherit" },
+);
+if ((await archive.exited) !== 0)
+  throw new Error("git archive failed — build the package from a git checkout");
+
 // 4) the publishable manifest — no workspace, no private, just the bin + deps
 const pkg = {
   name: rootPkg.name,
@@ -68,7 +87,7 @@ const pkg = {
   keywords: rootPkg.keywords,
   type: "module",
   bin: { op: "bin/op.js" },
-  files: ["bin", "genesis", "README.md", "LICENSE"],
+  files: ["bin", "genesis", "source.tar.gz", "README.md", "LICENSE"],
   engines: { bun: ">=1.3.0" },
   dependencies: {
     "@anthropic-ai/claude-agent-sdk":

@@ -19,6 +19,15 @@ behaves, or understand exactly what an agent can and cannot touch.
 | `importer`     | adapts a cloned external repo to the deploy contract               |
 | `platform-dev` | edits the platform's own config or source — proposed, never merged |
 
+The composer drafts against the TARGET repo's build contract
+(`packages/opd/src/crew/composer.ts:41`): a normal app gets the single-file
+app contract, the platform's own config/source and the app template each get
+theirs, so "add a model selector to the console" filed on `plat/opd` is
+drafted as daemon work, not as an app. And every builder run carries a
+decline contract (`packages/opd/src/crew/builder.ts:151`): an agent handed
+mis-scoped work ends with `DECLINED: …` instead of guessing, and the item
+parks with that explanation for you to re-scope.
+
 Each role is a directory in your `plat/platform` config repo:
 `crew/<role>/instructions.md` is the system prompt, and any
 `crew/<role>/skills/*.md` files are appended to it. The platform reads the
@@ -27,7 +36,7 @@ so merging a prompt edit changes the very next build — no restart. Changes by
 the crew to its own prompts are allowed but always
 [proposed to a human](/docs/gitops); a caged agent editing `plat/platform`
 may only touch `crew/**/*.md` and `platform.json`
-(`packages/opd/src/crew/builder.ts:255`).
+(`packages/opd/src/crew/builder.ts:293`).
 
 ## The container cage
 
@@ -57,7 +66,7 @@ The sandbox image `op/agent:latest` builds once from
 ## The credential
 
 The crew drives the `claude` CLI and needs a Claude Code OAuth token
-(`packages/opd/src/platform.ts:318`):
+(`packages/opd/src/platform.ts:353`):
 
 ```sh title="Terminal"
 claude setup-token          # prints sk-ant-oat01-…
@@ -77,14 +86,14 @@ Crew tunables live in `platform.json` in `plat/platform` and hot-reload on
 push — defaults are `maxRework: 2`, `sweepMs: 30000`, `model:
 "claude-sonnet-5"` (`packages/opd/src/platform-config.ts:44`). The model is
 passed into every builder and reviewer run
-(`packages/opd/src/crew/dispatcher.ts:439`); the composer uses a fast model
+(`packages/opd/src/crew/dispatcher.ts:473`); the composer uses a fast model
 (`claude-haiku-4-5`) independently.
 
 On a failing verdict the builder reworks the same branch, up to
 `crew.maxRework` times; exhaustion parks the item for you
-(`packages/opd/src/crew/dispatcher.ts:348`). Every attempt posts its real
+(`packages/opd/src/crew/dispatcher.ts:378`). Every attempt posts its real
 inference cost as a comment on the work item
-(`packages/opd/src/crew/dispatcher.ts:223`), so a work item's feed doubles
+(`packages/opd/src/crew/dispatcher.ts:250`), so a work item's feed doubles
 as its bill.
 
 > [!tip]

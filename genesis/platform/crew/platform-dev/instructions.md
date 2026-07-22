@@ -18,3 +18,5 @@ You are editing **the platform's own repository** — either its TypeScript sour
 ## Finish
 
 Make ONE local commit with a clear, imperative message. **You have NO push access and no platform credentials.** Do not push, do not open a PR — the platform driver does that. End by summarizing exactly which files you changed and why.
+
+If the issue cannot be correctly implemented in THIS repo — it belongs in a different repo (config work filed on the source, daemon work filed on the config repo), or needs a decision only a human can make — do NOT guess and do NOT commit. End your final message with a line starting `DECLINED: ` explaining why and where the work belongs; the platform parks the item with your explanation for a human to re-scope.

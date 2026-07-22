@@ -4,7 +4,7 @@ description: Every subsystem inside the one process, and the exact path a reques
 ---
 
 The entire platform is one Bun process. `Platform.up`
-(`packages/opd/src/platform.ts:131`) is the composition root: it opens the
+(`packages/opd/src/platform.ts:137`) is the composition root: it opens the
 store, proves key custody, seeds the system repos, starts ingress, the
 reconciler, and the crew — in one strict order, as function calls. There is
 no service mesh and no message bus. You read this page to learn where a
@@ -31,11 +31,11 @@ behavior lives, and what a backup must cover.
 
 Every HTTPS request enters at the gate, which terminates TLS and resolves
 identity — app-to-app bearer tokens are verified against the target host and
-die right there (`packages/opd/src/platform.ts:426`; see
+die right there (`packages/opd/src/platform.ts:460`; see
 [Identity](/docs/identity)). Requests to app hosts are proxied straight to
 the app's container, fail-closed when no repo row exists. Requests to the
 platform host go through one handler that tries four routers in order; the
-first non-null response wins (`packages/opd/src/platform.ts:390-393`):
+first non-null response wins (`packages/opd/src/platform.ts:424-427`):
 
 1. **forge** — git smart-HTTP and repo machinery (machines win first)
 2. **api** — `/api/v1` and `/healthz`
@@ -47,7 +47,7 @@ Anything unmatched is a JSON `404`.
 ## The state directory
 
 Everything lives under one root, `~/.op/<domain>` by default
-(`packages/opd/src/cli.ts:15`), laid out by `stateDir`
+(`packages/opd/src/cli.ts:20`), laid out by `stateDir`
 (`packages/core/src/paths.ts:17`):
 
 | Path        | Contents                                                                        |
@@ -70,7 +70,7 @@ a deliberate subset of it — see [Sovereignty](/docs/sovereignty).
 - **Desired state lives in git.** Every app spec is a file in the
   `sys/gitops` repo (`packages/opd/src/gitops.ts:14`), and the push is the
   event — even the platform's own config and source reload or re-exec the
-  daemon on merge (`packages/opd/src/platform.ts:452`). See
+  daemon on merge (`packages/opd/src/platform.ts:489`). See
   [GitOps](/docs/gitops) and [self-source](/docs/self-source).
 - **Policy enforced, or the mutation never happened.** Work-item phase moves
   are a compare-and-swap against a legal-edge table — an illegal move throws
@@ -79,7 +79,7 @@ a deliberate subset of it — see [Sovereignty](/docs/sovereignty).
   (`packages/opd/src/manifest.ts:83`).
 - **One sovereign key.** Every secret is sealed to `key.age`, and every boot
   proves every sealed value still decrypts with it — fail loud, not twenty
-  minutes later (`packages/opd/src/platform.ts:255`).
+  minutes later (`packages/opd/src/platform.ts:288`).
 - **Data is a directory.** Each app owns `appdata/<owner>/<app>` — SQLite
   plus files — so snapshots, preview branches, and migration between
   platforms are file operations. See [Data](/docs/data).

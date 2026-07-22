@@ -23,6 +23,36 @@ export interface IssueDraft {
   acceptanceChecks: string[];
 }
 
+/** What kind of repo the issue targets — each kind carries a different build
+ *  contract, so the composer must draft against the right one. Derived by the
+ *  API from the repo row (self-repo → config/source, is_template → template);
+ *  "app" is the default. */
+export type ComposerTargetKind =
+  | "app"
+  | "platform-config"
+  | "platform-source"
+  | "template";
+
+// Per-target contract, appended AFTER the (hot-reloadable) composer
+// instructions. Compiled-in on purpose: it must stay in step with the
+// dispatcher's routing and the builder's decline contract — code, not prompt
+// config. Worded as an override so it also corrects an older git-hosted
+// composer prompt that only knows the app contract.
+const TARGET_CONTRACTS: Record<ComposerTargetKind, string> = {
+  app: `TARGET — this issue is filed on a deployed app: a single-file Bun + bun:sqlite app served over OIDC (server.ts + Dockerfile). The caged builder implements it end to end; an adversarial reviewer verifies the acceptance checks over HTTP against a live preview, then it auto-merges and ships.`,
+  "platform-config": `TARGET OVERRIDE — this issue is filed on plat/platform, the PLATFORM'S OWN CONFIG repo, not an app. Ignore any single-file-app contract above. Only these files exist and may change: crew role prompts (crew/<role>/instructions.md, crew/<role>/skills/*.md) and platform.json tunables (crew.model, crew.maxRework, crew.sweepMs, apps.* caps). Draft the issue strictly in those terms. If the idea needs daemon code (new features, UI, endpoints, new SDKs), say in the body that it belongs on plat/opd instead and keep this issue to any config part that remains. Acceptance checks are diff-review criteria for a human merger — there is no live preview.`,
+  "platform-source": `TARGET OVERRIDE — this issue is filed on plat/opd, the PLATFORM DAEMON'S OWN SOURCE (a Bun + TypeScript monorepo under packages/*, strict types, Result-based errors, server-rendered console). Ignore any single-file-app contract above. Describe the change against the daemon's real architecture and name the packages/files likely to change. The change is proposed on a branch and PARKS FOR HUMAN REVIEW — no preview, no auto-merge — so acceptance checks are code-review criteria a human merger can verify by reading the diff (plus how to exercise it after a restart).`,
+  template: `TARGET OVERRIDE — this issue is filed on plat/app-template, the template EVERY FUTURE APP starts from. The app contract above applies to the template's own files (server.ts, ui.ts, Dockerfile, README). Note in the body that merging changes only apps created afterwards — existing apps are untouched — and that the change parks for human review instead of shipping through a preview.`,
+};
+
+// How the optional context snippet is framed, per target.
+const CONTEXT_LABELS: Record<ComposerTargetKind, string> = {
+  app: "The app's current server.ts (match its routes/helpers):",
+  "platform-config": "The repo's current platform.json and crew roles:",
+  "platform-source": "The daemon repo's file layout (name real paths from it):",
+  template: "The template's current server.ts (match its routes/helpers):",
+};
+
 // Live progress the console renders so the UI reflects the model's real state
 // (thinking → drafting) instead of freezing on a skeleton.
 export interface ComposerEvent {
@@ -37,15 +67,26 @@ const MODEL = process.env["OP_COMPOSER_MODEL"] ?? "claude-haiku-4-5";
 // crew role). This copy serves when that read fails — fail-open to last-good,
 // the PlatformConfig convention. Genesis seeds the git copy from
 // genesis/platform/crew/composer/instructions.md; keep the two in step.
-const SYSTEM = `You are the platform's issue composer. Turn a rough one-line idea into a crisp issue for a caged AI builder that implements it end to end in a single-file Bun + bun:sqlite app served over OIDC.
+const SYSTEM = `You are the platform's issue composer. Turn a rough one-line idea into a crisp issue for a caged AI builder. The build contract for the TARGET repo (an app, the platform's own config or source, or the app template) is appended below these instructions — draft against THAT contract.
 
-Emit an imperative title (<=60 chars); a 2-4 sentence body describing what to build; labels (always include "agent-work"); and 3-6 acceptance checks an adversary reviewer can verify over HTTP. ALWAYS fold the safety contract into the body: parameterized SQL only, escape user-controlled text, auth-gate every data path, keep the OIDC login and JSON-for-machines/HTML-for-browsers contract working, and idempotent migrations (preview runs on cloned prod data).`;
+Emit an imperative title (<=60 chars); a 2-4 sentence body describing what to build; labels (always include "agent-work"); and 3-6 acceptance checks a reviewer can verify — over HTTP against a live preview for apps, by reading the diff for the platform's own repos.
 
-async function systemFrom(load?: LoadAgent): Promise<string> {
-  if (!load) return SYSTEM;
-  const agent = await load("composer");
-  if (agent.status === "error") return SYSTEM;
-  return [agent.value.instructions, ...agent.value.skills].join("\n\n---\n\n");
+For app targets, ALWAYS fold the safety contract into the body: parameterized SQL only, escape user-controlled text, auth-gate every data path, keep the OIDC login and JSON-for-machines/HTML-for-browsers contract working, and idempotent migrations (preview runs on cloned prod data).`;
+
+async function systemFrom(
+  load: LoadAgent | undefined,
+  target: ComposerTargetKind,
+): Promise<string> {
+  let base = SYSTEM;
+  if (load) {
+    const agent = await load("composer");
+    if (agent.status === "ok")
+      base = [agent.value.instructions, ...agent.value.skills].join(
+        "\n\n---\n\n",
+      );
+  }
+  const contract = TARGET_CONTRACTS[target];
+  return contract ? `${base}\n\n---\n\n${contract}` : base;
 }
 
 // Grammar-constrained output — the SDK forces a synthetic tool matching this
@@ -107,10 +148,14 @@ function extractObject(text: string): Record<string, unknown> {
     : {};
 }
 
-function userPrompt(idea: string, context?: string): string {
+function userPrompt(
+  idea: string,
+  context: string | undefined,
+  target: ComposerTargetKind,
+): string {
   return (
     (context
-      ? `The app's current server.ts (match its routes/helpers):\n\`\`\`\n${context.slice(0, 6000)}\n\`\`\`\n\n`
+      ? `${CONTEXT_LABELS[target]}\n\`\`\`\n${context.slice(0, 6000)}\n\`\`\`\n\n`
       : "") +
     `Rough idea: "${idea}"\n\nCompose the issue as the structured object.`
   );
@@ -119,6 +164,8 @@ function userPrompt(idea: string, context?: string): string {
 export async function draftIssue(opts: {
   idea: string;
   context?: string; // the app's server.ts, so drafts match its real routes
+  /** Which build contract the target repo carries; defaults to "app". */
+  target?: ComposerTargetKind;
   oauthToken: string;
   log: Log;
   /** Git-hot-reloadable prompt (crew/composer/); absent or unreadable → the
@@ -132,7 +179,8 @@ export async function draftIssue(opts: {
 }): Promise<Result<IssueDraft, ComposerError>> {
   const idea = opts.idea.trim().slice(0, 500);
   if (!idea) return Result.err(new ComposerError({ message: "empty idea" }));
-  const system = await systemFrom(opts.loadAgent);
+  const target = opts.target ?? "app";
+  const system = await systemFrom(opts.loadAgent, target);
 
   // Fast lane: a REAL api key (not the oat token) skips the whole SDK subprocess
   // + cached-prompt tax — the raw Messages API with grammar-constrained output
@@ -144,12 +192,13 @@ export async function draftIssue(opts: {
       system,
       apiKey,
       opts.context,
+      target,
       opts.deadlineMs ?? 30_000,
       opts.fetchImpl ?? fetch,
     );
 
   const run = opts.runQuery ?? query;
-  const prompt = userPrompt(idea, opts.context);
+  const prompt = userPrompt(idea, opts.context, target);
   const emit = opts.onEvent;
 
   const abort = new AbortController();
@@ -228,6 +277,7 @@ async function draftViaApi(
   system: string,
   apiKey: string,
   context: string | undefined,
+  target: ComposerTargetKind,
   deadlineMs: number,
   fetchImpl: typeof fetch,
 ): Promise<Result<IssueDraft, ComposerError>> {
@@ -246,7 +296,9 @@ async function draftViaApi(
         model: MODEL,
         max_tokens: 1024,
         system,
-        messages: [{ role: "user", content: userPrompt(idea, context) }],
+        messages: [
+          { role: "user", content: userPrompt(idea, context, target) },
+        ],
         output_config: { format: { type: "json_schema", schema: SCHEMA } },
       }),
     });

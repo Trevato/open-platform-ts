@@ -186,6 +186,28 @@ describe("builder", () => {
     const issue = claimed(h, "app", { title: "x", body: "" });
     const built = await runBuilder(builderDeps(h, noop, h.admin), issue);
     expect(built.status).toBe("error");
+    // The agent's final message rides in the error so the park comment says
+    // WHY, not just "no changes".
+    if (built.status === "error")
+      expect(built.error.message).toContain("nothing to do");
+    expect(h.store.getIssue("plat", "app", 1)?.change_state).toBeNull();
+  });
+
+  test("DECLINED: an agent that invokes the decline contract returns the note, not an error", async () => {
+    const h = await harness();
+    const decliner: RunAgent = async () =>
+      Result.ok({
+        ok: true,
+        result:
+          "I compared ISSUE.md against this repo.\nDECLINED: this is daemon work — it belongs on plat/opd, not the config repo.",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    const issue = claimed(h, "app", { title: "x", body: "" });
+    const built = await runBuilder(builderDeps(h, decliner, h.admin), issue);
+    expect(built.status).toBe("ok");
+    if (built.status === "ok")
+      expect(built.value.declined).toContain("belongs on plat/opd");
     expect(h.store.getIssue("plat", "app", 1)?.change_state).toBeNull();
   });
 
@@ -576,6 +598,79 @@ describe("dispatcher", () => {
       .join("\n");
     expect(comments).toContain("Proposed the change");
     expect(comments).toContain("review the diff and Merge");
+  });
+
+  test("a declined build parks with the agent's explanation in the feed", async () => {
+    const h = await harness();
+    const runAgent: RunAgent = async () =>
+      Result.ok({
+        ok: true,
+        result: "DECLINED: wrong repo — file this on plat/opd.",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    const d = new Dispatcher(dispatcherReviewDeps(h, runAgent));
+    fileWork(h, "app", { title: "x", body: "" });
+    await d.tick();
+    await settle(h);
+    const issue = h.store.getIssue("plat", "app", 1)!;
+    expect(issue.phase).toBe("parked");
+    expect(issue.parked_reason).toBe("declined");
+    expect(issue.change_state).toBeNull(); // nothing was proposed
+    const comments = h.store
+      .listComments("plat", "app", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("wrong repo — file this on plat/opd");
+  });
+
+  test("an app-template issue is PROPOSED for a human — no preview, no auto-merge", async () => {
+    const h = await harness();
+    const seed = await mkdtemp(join(tmpdir(), "op-tpl-"));
+    dirs.push(seed);
+    await writeFile(join(seed, "server.ts"), "// template\n");
+    Result.unwrap(
+      await h.forge.createRepo(h.admin, "plat", "app-template", {
+        isTemplate: true,
+      }),
+    );
+    Result.unwrap(
+      await h.git.seedRepoFromDir("plat", "app-template", seed, "init"),
+    );
+    let reviewed = false;
+    const runAgent: RunAgent = async (run) => {
+      if (existsSync(join(run.cwd, "REVIEW.md"))) {
+        reviewed = true;
+        return Result.ok({
+          ok: true,
+          result: "✅ PASS",
+          costUsd: 0,
+          numTurns: 1,
+        });
+      }
+      await writeFile(join(run.cwd, "server.ts"), "// improved template\n");
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.02,
+        numTurns: 1,
+      });
+    };
+    const d = new Dispatcher(dispatcherReviewDeps(h, runAgent));
+    fileWork(h, "app-template", { title: "polish the template", body: "b" });
+    await d.tick();
+    await settle(h, 1, 20_000, "app-template");
+
+    expect(reviewed).toBe(false); // not deployed: no preview → no reviewer
+    const issue = h.store.getIssue("plat", "app-template", 1)!;
+    expect(issue.change_state).toBe("open"); // proposed, NOT auto-merged
+    expect(issue.phase).toBe("parked");
+    expect(issue.parked_reason).toBe("template-human-merge");
+    const comments = h.store
+      .listComments("plat", "app-template", 1)
+      .map((c) => c.body)
+      .join("\n");
+    expect(comments).toContain("template every future app starts from");
   });
 
   test("without a credential, stays queued and does not build (no stale comment)", async () => {

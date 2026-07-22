@@ -39,7 +39,7 @@ header — the platform's identity channel cannot be forged
 (`packages/gate/src/gate.ts:117-120`). App-to-app bearer tokens die at the
 gate: each is verified against the target host's origin as audience, so a
 token minted for one app verifies as nothing at any other
-(`packages/opd/src/platform.ts:412-426`). Details in
+(`packages/opd/src/platform.ts:446-460`). Details in
 [Ingress](/docs/ingress) and [Identity](/docs/identity).
 
 ## One sovereign key
@@ -47,7 +47,7 @@ token minted for one app verifies as nothing at any other
 Every platform secret is sealed to exactly one age recipient, and on every
 boot the sovereignty gate proves it: each value must decrypt with your key
 and name exactly one recipient stanza, or the platform refuses to start
-(`packages/opd/src/platform.ts:255`). There is no escrow and no recovery
+(`packages/opd/src/platform.ts:288`). There is no escrow and no recovery
 path — the key file is the one deliberate single point of failure, and that
 is the price of [sovereignty](/docs/sovereignty): no vendor, parent platform,
 or third party can ever read your secrets either.
@@ -86,7 +86,7 @@ and merges. See [how a request becomes software](/docs/how-it-builds).
 
 In M1, repos are public-read, and therefore so are the apps deployed from
 them: the gate's authorization check is exactly "the repo exists"
-(`packages/opd/src/platform.ts:441-442`). Any user signed in to your
+(`packages/opd/src/platform.ts:478-479`). Any user signed in to your
 platform — and any caller of a public route — can reach any app. Do not host
 tenant-confidential apps on a shared M1 platform; per-app access policy is a
 later milestone. Raw TCP ports have no SSO at all — the app behind the port

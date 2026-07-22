@@ -22,7 +22,7 @@ initially costs almost no disk.
 ## Taking one
 
 Press **Snapshot** on the app's console page, or hit the API — both call the
-same route (`packages/opd/src/console/index.ts:838`):
+same route (`packages/opd/src/console/index.ts:842`):
 
 ```sh title="Terminal"
 curl -sk -u plat:<password> -X POST \
@@ -30,8 +30,8 @@ curl -sk -u plat:<password> -X POST \
 ```
 
 You need write access to the app; the route returns `201` with the new
-snapshot's `id` (`packages/opd/src/api.ts:1158`). A `GET` on the same URL
-lists existing snapshot IDs, oldest first (`packages/opd/src/api.ts:1161`).
+snapshot's `id` (`packages/opd/src/api.ts:1217`). A `GET` on the same URL
+lists existing snapshot IDs, oldest first (`packages/opd/src/api.ts:1220`).
 
 ## Checkpoint, clone, verify
 
@@ -63,7 +63,7 @@ redeploys and is deleted when the change closes.
 
 `op app export` packages an app for another sovereign platform: its full git
 history, its `op.json`, and a fresh verified snapshot taken at export time as
-the data-of-record (`packages/opd/src/platform.ts:648`). On the target,
+the data-of-record (`packages/opd/src/platform.ts:707`). On the target,
 [import](/docs/import-an-app) lays that data down with the same
 `integrity_check` gate before the app ever starts.
 

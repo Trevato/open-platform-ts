@@ -3,7 +3,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createLog, Result } from "@op/core";
 import { readLineage } from "@op/mitosis";
-import { Platform, readAdminPassword, type PlatformOpts } from "./platform.ts";
+import {
+  defaultSourceDir,
+  Platform,
+  readAdminPassword,
+  type PlatformOpts,
+} from "./platform.ts";
 import { bunSupervisorIo, supervise, UPGRADE_EXIT } from "./supervisor.ts";
 
 function env(name: string, fallback: string): string {
@@ -48,21 +53,28 @@ function card(p: Platform): void {
 }
 
 // The daemon: boot, print the card, serve forever. When its own source
-// (plat/opd) changes it asks the supervisor to re-exec by exiting UPGRADE_EXIT;
-// unsupervised, that just exits (the operator restarts). Apps outlive it.
+// (plat/opd) changes under a supervisor, it asks for a re-exec by exiting
+// UPGRADE_EXIT. Unsupervised, exiting would just kill the platform with
+// nothing to restart it — so the daemon keeps serving the old code and the
+// merge applies on the next (ideally supervised) boot. Apps outlive it.
 async function serve(domain: string): Promise<number> {
   let upgrading = false;
   let booted: Platform | undefined;
+  const supervised = process.env["OP_SUPERVISED"] === "1";
   const opts: PlatformOpts = {
     ...optsFromEnv(domain),
-    onUpgradeRequested: () => {
-      if (upgrading) return;
-      upgrading = true;
-      void (async () => {
-        await booted?.stop().catch(() => {});
-        process.exit(UPGRADE_EXIT);
-      })();
-    },
+    ...(supervised
+      ? {
+          onUpgradeRequested: () => {
+            if (upgrading) return;
+            upgrading = true;
+            void (async () => {
+              await booted?.stop().catch(() => {});
+              process.exit(UPGRADE_EXIT);
+            })();
+          },
+        }
+      : {}),
   };
   const result = await Platform.up(opts);
   if (result.status === "error") {
@@ -105,7 +117,11 @@ async function main(): Promise<number> {
     case "seed": {
       const out =
         rest[0] ?? `seed-${new Date().toISOString().slice(0, 10)}.tar.gz`;
-      const booted = await Platform.up(optsFromEnv(domain));
+      // One-shot boot: self-source publishing is a serving-daemon concern.
+      const booted = await Platform.up({
+        ...optsFromEnv(domain),
+        hostSourceOnBoot: false,
+      });
       if (booted.status === "error") {
         console.error(`op seed FAILED: ${booted.error.message}`);
         return 1;
@@ -153,7 +169,10 @@ async function main(): Promise<number> {
         const out =
           rest[2] ??
           `${owner}-${app}-${new Date().toISOString().slice(0, 10)}.tar.gz`;
-        const booted = await Platform.up(optsFromEnv(domain));
+        const booted = await Platform.up({
+          ...optsFromEnv(domain),
+          hostSourceOnBoot: false,
+        });
         if (booted.status === "error") {
           console.error(`op app export FAILED: ${booted.error.message}`);
           return 1;
@@ -185,7 +204,10 @@ async function main(): Promise<number> {
                 app: remap.split("/")[1]!,
               }
             : {};
-        const booted = await Platform.up(optsFromEnv(domain));
+        const booted = await Platform.up({
+          ...optsFromEnv(domain),
+          hostSourceOnBoot: false,
+        });
         if (booted.status === "error") {
           console.error(`op app import FAILED: ${booted.error.message}`);
           return 1;
@@ -207,11 +229,14 @@ async function main(): Promise<number> {
       return 2;
     }
     case "host-source": {
-      const srcDir =
-        rest[0] ??
-        process.env["OP_SRC"] ??
-        join(import.meta.dir, "..", "..", "..");
-      const booted = await Platform.up(optsFromEnv(domain));
+      // Mostly a repair/override tool now — `op up` hosts the source itself
+      // (from a checkout or the npm package's shipped tarball) on every boot.
+      // hostSourceOnBoot:false so an explicit dir can't lose to the auto-publish.
+      const srcDir = rest[0] ?? defaultSourceDir();
+      const booted = await Platform.up({
+        ...optsFromEnv(domain),
+        hostSourceOnBoot: false,
+      });
       if (booted.status === "error") {
         console.error(`op host-source FAILED: ${booted.error.message}`);
         return 1;
@@ -224,7 +249,7 @@ async function main(): Promise<number> {
       }
       console.log(
         hosted.value.created
-          ? `hosted plat/opd from ${srcDir} — the crew can now edit the platform; push to plat/opd to self-upgrade`
+          ? `hosted plat/opd from ${srcDir ?? "the shipped source tarball"} — the crew can now edit the platform; push to plat/opd to self-upgrade`
           : "plat/opd already hosted",
       );
       const root = env("OP_ROOT", join(homedir(), ".op", domain));
@@ -254,7 +279,7 @@ async function main(): Promise<number> {
     }
     default:
       console.log(
-        "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op admin-password        print this platform's admin password\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (OP_SRC=)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
+        "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op admin-password        print this platform's admin password\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (automatic on boot; this overrides the dir)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
       );
       return cmd ? 2 : 0;
   }

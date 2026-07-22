@@ -3,6 +3,33 @@
 The living doc for the July 2026 push. Read this to get current, then follow
 any recipe to see a feature working. Updated after every milestone.
 
+**Status (2026-07-22): the platform is editable from within, out of the box.**
+Every boot now publishes the daemon's own source into `plat/opd`
+automatically — from a checkout via `git archive HEAD`, from an npm/bunx
+install via a `source.tar.gz` the package ships beside `genesis/`
+(`scripts/build-package.ts`). The composer is target-aware: an idea filed on
+`plat/opd`, `plat/platform`, or `plat/app-template` is drafted against that
+repo's real contract (daemon monorepo / config allowlist / template), not as
+a single-file app. Builders carry a decline contract — mis-scoped work ends
+with `DECLINED: <why>` and the item parks with that explanation
+(`parked_reason: declined`) instead of a cryptic "produced no changes".
+Template repos get the same human merge gate as self-repos
+(`template-human-merge`) — no more waiting on a preview that can never come.
+An unsupervised daemon no longer exits on a `plat/opd` merge (it keeps
+serving and the merge applies next boot); supervised (`OP_SRC=`) still
+re-execs with rollback. The console Platform page shows Source / Config /
+Template cards.
+
+Feel it:
+
+```sh
+bun test test/host-source.e2e.test.ts     # auto-host + tarball fallback + no-secret-leak
+bun test packages/opd/test/crew.test.ts   # decline flow + template gate
+# or boot any platform and open /platform — the Source card is live
+# immediately; file "add a model selector when creating an issue" on
+# plat/opd and watch the draft come back daemon-shaped.
+```
+
 **Status (2026-07-14):** the capability release. Apps now declare what they
 NEED in `op.json` beside their Dockerfile — memory/cpus, raw TCP ports (a
 Minecraft server's 25565), assets the platform fetches into `/data` before

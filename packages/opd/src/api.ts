@@ -5,14 +5,59 @@ import type { Engine } from "@op/engine";
 import type { Forge } from "@op/forge";
 import type { GitHost } from "@op/git";
 import type { IssueRow, Store, UserRow, WorkPhase } from "@op/store";
+import type { ComposerTargetKind } from "./crew/composer.ts";
 import type { GuideEvent, GuideMessage } from "./crew/guide.ts";
 import { appSpecPath, commitFiles, readAppSpecs, TEMPLATE } from "./gitops.ts";
+import { PLAT, isSelfRepo } from "./platform-config.ts";
 import { computeIntegrationMap } from "./integration.ts";
 import type { AppPolicy } from "./manifest.ts";
 import { hostFor, type AppSpec } from "./policy.ts";
 import type { Reconciler } from "./reconcile.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+
+/** Context snippet for the composer, shaped by the target kind: an app's
+ *  server.ts, the config repo's platform.json + crew roles, or the daemon
+ *  repo's file layout. Absence degrades to no context, never an error. */
+async function composerContext(
+  git: GitHost,
+  owner: string,
+  repo: string,
+  target: ComposerTargetKind,
+): Promise<string | undefined> {
+  if (target === "app" || target === "template") {
+    const ctx = await git.readFile(owner, repo, "main", "server.ts");
+    return ctx.status === "ok"
+      ? new TextDecoder().decode(ctx.value)
+      : undefined;
+  }
+  if (target === "platform-config") {
+    const cfg = await git.readFile(owner, repo, "main", "platform.json");
+    const files = await git.listFiles(owner, repo, "main");
+    const roles =
+      files.status === "ok"
+        ? files.value.filter((p) => /^crew\/[^/]+\/instructions\.md$/.test(p))
+        : [];
+    if (cfg.status === "error" && roles.length === 0) return undefined;
+    return [
+      cfg.status === "ok"
+        ? `platform.json:\n${new TextDecoder().decode(cfg.value)}`
+        : "",
+      roles.length ? `crew roles:\n${roles.join("\n")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  // platform-source: the daemon monorepo's layout, so drafts name real paths.
+  const files = await git.listFiles(owner, repo, "main");
+  if (files.status === "error") return undefined;
+  const interesting = files.value.filter(
+    (p) =>
+      !p.includes("/") ||
+      /^(packages\/[^/]+\/src\/|docs\/|genesis\/|test\/)/.test(p),
+  );
+  return interesting.slice(0, 400).join("\n");
+}
 
 // The work-item phase vocabulary (mirrors the store's legal-edge table) and
 // the non-terminal subset the platform-wide queue reports by default.
@@ -131,6 +176,7 @@ export interface ApiDeps {
           phase: "thinking" | "drafting";
           text?: string;
         }) => void,
+        target?: ComposerTargetKind,
       ) => Promise<{
         title: string;
         body: string;
@@ -798,9 +844,19 @@ export function apiRouter(
         idea?: string;
       } | null;
       if (!body?.idea?.trim()) return json({ error: "idea required" }, 400);
-      const ctx = await deps.git.readFile(owner, repo, "main", "server.ts");
-      const context =
-        ctx.status === "ok" ? new TextDecoder().decode(ctx.value) : undefined;
+      // The target kind decides which build contract the composer drafts
+      // against: the platform's own config/source repos and the app template
+      // are not single-file apps, and drafting them as one produces work the
+      // builder can only decline.
+      const repoRow = deps.store.getRepo(owner, repo);
+      const target: ComposerTargetKind = isSelfRepo(owner, repo)
+        ? repo === PLAT.name
+          ? "platform-config"
+          : "platform-source"
+        : repoRow?.is_template === 1
+          ? "template"
+          : "app";
+      const context = await composerContext(deps.git, owner, repo, target);
       const idea = body.idea;
       const compose = deps.draftIssue;
 
@@ -820,8 +876,11 @@ export function apiRouter(
               }
             };
             try {
-              const draft = await compose(idea, context, (ev) =>
-                send({ type: "event", ...ev }),
+              const draft = await compose(
+                idea,
+                context,
+                (ev) => send({ type: "event", ...ev }),
+                target,
               );
               send(
                 draft
@@ -843,7 +902,7 @@ export function apiRouter(
         });
       }
 
-      const draft = await compose(idea, context);
+      const draft = await compose(idea, context, undefined, target);
       if (!draft) return json({ error: "composer_offline" }, 503);
       return json(draft);
     }

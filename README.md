@@ -76,7 +76,7 @@ The platform documents itself. `/docs` is a three-pane reading surface (grouped
 nav, scroll-spy TOC, ⌘K search) rendered from markdown that lives in
 `plat/platform` — so a merged commit updates the manual live, and a germinated
 daughter is born documented. Every code reference in the docs (like
-`packages/opd/src/api.ts:159`) links into the platform's own hosted source, and
+`packages/opd/src/api.ts:205`) links into the platform's own hosted source, and
 a CI checker (`test/docs.test.ts`) fails the build if any reference names a file
 or line that no longer exists — documentation that drifts can't merge. Pages are
 also served raw at `/docs/<page>.md`, `/docs/llms.txt`, and `/docs/search.json`
@@ -102,6 +102,22 @@ the gate (`x-plat-user: app:owner/app` upstream). The platform derives an
 Integrations); nothing is registered, so nothing goes stale. Everything is
 bounded by operator policy in `plat/platform`'s `platform.json` and admitted
 fail-closed.
+
+## The platform edits itself
+
+Every boot publishes the platform's own source into a repo it hosts,
+`plat/opd` — from a checkout via `git archive`, from an npm install via a
+source tarball shipped in the package. The console's **Platform** page shows
+three cards — Source (`plat/opd`), Config (`plat/platform`), and Template
+(`plat/app-template`) — and filing an issue on any of them runs the same crew
+loop, pointed at the platform: the composer drafts against the right contract
+(daemon monorepo, config repo, or app template — not a single-file app), a
+`platform-dev` agent writes the change, and the branch **parks for a human
+merge** — the platform's own repos never auto-merge. A config merge
+hot-reloads live; a source merge re-execs the daemon under a supervised boot
+(`OP_SRC=<clone> op up`), with automatic rollback if the new daemon dies. An
+agent handed mis-scoped work declines with an explanation instead of
+guessing. See `/docs/self-source` on your platform.
 
 ## Work items — the development process
 

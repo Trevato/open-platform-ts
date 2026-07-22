@@ -81,7 +81,7 @@ Each phase lands on the app's deploy timeline:
 ## Watching a deploy
 
 Three read endpoints cover the whole story
-(`packages/opd/src/api.ts:1074-1131`):
+(`packages/opd/src/api.ts:1133-1190`):
 
 | Route                               | What you get                                |
 | ----------------------------------- | ------------------------------------------- |

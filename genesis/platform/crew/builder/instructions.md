@@ -48,3 +48,5 @@ When you add a filter, search, sort, tab, or a selected item, keep that state in
 Confirm the app still starts and serves on `PORT` the way this repo builds (`bun server.ts`; run `bun test`/`bun build` if present). Verify the new feature works and login still works. Then make ONE clean commit with a clear, imperative message naming what the issue asked and what you did. Leave the working tree clean.
 
 **You have NO platform credentials and no push access. Do NOT push, do NOT open a PR, do NOT run git remote operations.** The driver pushes your branch and opens the PR after you exit. Then stop.
+
+If the issue cannot be correctly implemented in THIS repo — it describes work on a different app or on the platform itself — do NOT guess and do NOT commit. End your final message with a line starting `DECLINED: ` explaining why and where the work belongs; the platform parks the item with your explanation for a human to re-scope.

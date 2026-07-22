@@ -196,6 +196,20 @@ export class Dispatcher {
       builderCostUsd: built.value.costUsd,
     });
 
+    // The agent invoked the decline contract: mis-scoped work, explained in
+    // its own words. Park with the explanation — a human edits the issue (or
+    // re-files it on the right repo) and Re-queues.
+    if (built.value.declined) {
+      this.park(
+        issue,
+        "the builder declined the work item",
+        "declined",
+        `🧭 The builder declined this work item (cost $${built.value.costUsd.toFixed(2)}):\n\n> ${built.value.declined.replace(/\n/g, "\n> ")}\n\nEdit the issue — or re-file it on the repo it belongs to — then Re-queue.`,
+      );
+      log.info("crew: declined", { issue: this.key(issue) });
+      return;
+    }
+
     const branch = `agent/issue-${issue.number}`;
 
     // Self-modification: the platform's own config (plat/platform) or source
@@ -208,9 +222,22 @@ export class Dispatcher {
         issue,
         `this edits the platform's own ${isConfig ? "config" : "source"}`,
         "self-repo-human-merge",
-        `🛠️ Proposed the change on \`${branch}\` (cost $${built.value.costUsd.toFixed(2)}). This edits the platform's own ${isConfig ? "config" : "source"} (\`${issue.owner}/${issue.repo}\`) — review the diff and Merge. ${isConfig ? `A merge to \`${PLAT.name}\` hot-reloads it; no restart.` : "Applying source changes needs `op upgrade` or a restart."}`,
+        `🛠️ Proposed the change on \`${branch}\` (cost $${built.value.costUsd.toFixed(2)}). This edits the platform's own ${isConfig ? "config" : "source"} (\`${issue.owner}/${issue.repo}\`) — review the diff and Merge. ${isConfig ? `A merge to \`${PLAT.name}\` hot-reloads it; no restart.` : "Applying source changes needs a supervised restart (`OP_SRC=… op up`) or a plain restart."}`,
       );
       log.info("crew: self-change proposed", { issue: this.key(issue) });
+      return;
+    }
+
+    // Template repos (plat/app-template) are not deployed apps either — no
+    // preview exists, and a merge changes every FUTURE app. Same human gate.
+    if (this.deps.store.getRepo(issue.owner, issue.repo)?.is_template === 1) {
+      this.park(
+        issue,
+        "this edits an app template",
+        "template-human-merge",
+        `🧬 Proposed the change on \`${branch}\` (cost $${built.value.costUsd.toFixed(2)}). This edits the template every future app starts from (\`${issue.owner}/${issue.repo}\`) — review the diff and Merge. Existing apps are unaffected.`,
+      );
+      log.info("crew: template change proposed", { issue: this.key(issue) });
       return;
     }
 
@@ -374,6 +401,13 @@ export class Dispatcher {
       store.setAttemptBuilder(issue.owner, issue.repo, issue.number, reworkNo, {
         builderCostUsd: reworked.value.costUsd,
       });
+      if (reworked.value.declined)
+        return this.park(
+          issue,
+          "the builder declined the rework",
+          "declined",
+          `🧭 The builder declined the rework:\n\n> ${reworked.value.declined.replace(/\n/g, "\n> ")}\n\nA human should resolve the blockers — Merge or Re-queue from the console.`,
+        );
       this.deps.kickReconciler(); // rebuild the preview from the updated branch
       store.setWorkPhase(issue.owner, issue.repo, issue.number, "reviewing");
       this.comment(

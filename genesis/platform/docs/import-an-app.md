@@ -12,7 +12,7 @@ already exists and you would rather not repackage it by hand.
 ## Start an import
 
 Paste a clone URL into the dashboard's import form, or call the API — the
-form posts the same body (`packages/opd/src/console/index.ts:354`):
+form posts the same body (`packages/opd/src/console/index.ts:356`):
 
 ```sh title="Terminal"
 curl -sk -u plat:<password> -X POST https://plat.localtest.me/api/v1/apps/import \
@@ -21,8 +21,8 @@ curl -sk -u plat:<password> -X POST https://plat.localtest.me/api/v1/apps/import
 ```
 
 `POST /api/v1/apps/import` takes `{url, owner?, name?}`
-(`packages/opd/src/api.ts:348`). The name defaults to the URL's last path
-segment minus `.git` (`packages/opd/src/api.ts:97`). The platform clones the
+(`packages/opd/src/api.ts:394`). The name defaults to the URL's last path
+segment minus `.git` (`packages/opd/src/api.ts:142`). The platform clones the
 remote into a repo it hosts — a failed clone rolls the registration back, so
 there is no phantom repo to clean up (`packages/forge/src/forge.ts:322`) —
 commits an app spec to gitops, and answers `201` with the app's host, its
@@ -31,23 +31,23 @@ platform `cloneUrl`, and the number of the conversion work item.
 > [!note]
 > `op app import <seed.tar.gz>` is a different verb: it moves an app that
 > already runs on one platform to another, data included
-> (`packages/opd/src/cli.ts:173`). See [Sovereignty](/docs/sovereignty).
+> (`packages/opd/src/cli.ts:193`). See [Sovereignty](/docs/sovereignty).
 
 ## The conversion work item
 
 The import files one [work item](/docs/work-items), born queued, labeled
-`agent-import` and `agent-work` (`packages/opd/src/api.ts:424`). Its body is
-the conversion spec (`packages/opd/src/api.ts:412`): a root `Dockerfile` that
+`agent-import` and `agent-work` (`packages/opd/src/api.ts:470`). Its body is
+the conversion spec (`packages/opd/src/api.ts:458`): a root `Dockerfile` that
 builds and starts the server on `PORT`, persistent state only under
 `DATA_DIR`, a non-root container user, and the app's existing behavior kept
 intact. The acceptance criteria are explicit
-(`packages/opd/src/api.ts:422`): the preview builds, serves HTTP 200 on `/`
+(`packages/opd/src/api.ts:468`): the preview builds, serves HTTP 200 on `/`
 (or a documented health path), and survives a restart with its data intact.
 
 ## The importer role
 
 The dispatcher routes `agent-import` items to the `importer` crew role
-instead of the builder (`packages/opd/src/crew/dispatcher.ts:435`). Its
+instead of the builder (`packages/opd/src/crew/dispatcher.ts:469`). Its
 instructions are the inverse of a feature build: adapt someone else's
 project — any language, any framework — with the smallest possible diff, and
 never rewrite (`genesis/platform/crew/importer/instructions.md:5`). The
@@ -70,10 +70,10 @@ is left as clearly stated partial progress rather than a faked deploy
 (`genesis/platform/crew/importer/instructions.md:37`). The item then parks —
 as it also does for a failed build, a preview that never comes up, or an
 exhausted rework budget — and waits for a human
-(`packages/opd/src/crew/dispatcher.ts:405`).
+(`packages/opd/src/crew/dispatcher.ts:439`).
 
 Parked items head the crew queue at `GET /api/v1/crew` and the `/crew` page
-(`packages/opd/src/api.ts:1020`). The change branch is left in place, so you
+(`packages/opd/src/api.ts:1079`). The change branch is left in place, so you
 can:
 
 - Read the crew's last comment and commit message — the blocker is stated

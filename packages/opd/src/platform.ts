@@ -78,6 +78,10 @@ export interface PlatformOpts {
   /** Called when the platform's own source (plat/opd) changes — the daemon asks
    *  its supervisor to re-exec from the new source. Absent = no self-upgrade. */
   onUpgradeRequested?: () => void;
+  /** Publish the daemon's own source into plat/opd on boot (default true).
+   *  `op host-source <dir>` disables it so an explicit dir can't lose the
+   *  race to the automatic publish. */
+  hostSourceOnBoot?: boolean;
   log?: Log;
 }
 
@@ -104,6 +108,32 @@ function defaultGenesisDir(): string {
   );
 }
 
+/** Where this process's own source lives: OP_SRC when the operator points at
+ *  a managed clone, else the repo root the source tree runs from — VERIFIED
+ *  by a marker only the real monorepo has. In a bundled npm install the
+ *  layout guess (three dirs up from the bin) lands inside the CONSUMING
+ *  project, and `git archive` there would publish a stranger's repo into the
+ *  world-readable plat/opd — so an unverified guess returns null and
+ *  hostSource uses the shipped tarball instead. */
+export function defaultSourceDir(): string | null {
+  const env = process.env["OP_SRC"];
+  if (env) return env;
+  const root = join(import.meta.dir, "..", "..", ".."); // packages/opd/src → repo root
+  return existsSync(join(root, "packages", "opd", "src", "cli.ts"))
+    ? root
+    : null;
+}
+
+/** The source tarball the npm package ships beside genesis/ (see
+ *  scripts/build-package.ts), or null when absent (source-tree runs).
+ *  OP_SOURCE_TARBALL overrides for tests/exotic layouts. */
+export function defaultSourceTarball(): string | null {
+  const env = process.env["OP_SOURCE_TARBALL"];
+  if (env) return existsSync(env) ? env : null;
+  const beside = join(defaultGenesisDir(), "..", "source.tar.gz");
+  return existsSync(beside) ? beside : null;
+}
+
 export class Platform {
   /** Set when THIS boot minted the admin user — shown once on the card. */
   freshAdminPassword: string | undefined;
@@ -111,6 +141,9 @@ export class Platform {
   /** True when a Claude credential is configured and the crew can build. */
   crewCredentialed = false;
   dispatcher: Dispatcher | undefined;
+  /** Background publish of the daemon's own source into plat/opd (boot
+   *  doesn't wait on it; stop() drains it). */
+  sourceHosting: Promise<void> | undefined;
 
   private constructor(
     readonly sd: StateDir,
@@ -334,7 +367,7 @@ export class Platform {
           kickCrew: () => crewKick.fn(),
           crewCredentialed: () => claudeToken !== null,
           draftIssue: claudeToken
-            ? async (idea, context, onEvent) => {
+            ? async (idea, context, onEvent, target) => {
                 const d = await draftIssue({
                   idea,
                   oauthToken: claudeToken,
@@ -342,6 +375,7 @@ export class Platform {
                   loadAgent: (role) => platformConfig.loadAgent(role),
                   ...(context ? { context } : {}),
                   ...(onEvent ? { onEvent } : {}),
+                  ...(target ? { target } : {}),
                 });
                 return d.status === "ok" ? d.value : null;
               }
@@ -458,10 +492,19 @@ export class Platform {
             // memory cap) should take effect without waiting for a push.
             void platformConfig.reload().then(() => void reconciler.kickAll());
           }
-          // A merge to the platform's own SOURCE re-execs the daemon from it.
+          // A merge to the platform's own SOURCE re-execs the daemon from it —
+          // but only under a supervisor that will bring it back. Unsupervised,
+          // exiting would just kill the platform; keep serving the old code
+          // and tell the operator how to apply the change.
           if (evt.owner === OPD.owner && evt.name === OPD.name) {
-            log.info("self-upgrade: plat/opd changed — requesting re-exec");
-            opts.onUpgradeRequested?.();
+            if (opts.onUpgradeRequested) {
+              log.info("self-upgrade: plat/opd changed — requesting re-exec");
+              opts.onUpgradeRequested();
+            } else {
+              log.info(
+                "plat/opd changed — still serving the old code; restart to apply (OP_SRC=<clone> op up self-upgrades on merge)",
+              );
+            }
           }
         });
 
@@ -529,6 +572,22 @@ export class Platform {
         platform.caCertPem = ca.caCert;
         platform.crewCredentialed = claudeToken !== null;
         platform.dispatcher = dispatcher;
+        // Self-source: publish the daemon's own source into plat/opd so the
+        // platform is editable from within — from a checkout via git archive,
+        // from an npm install via the shipped tarball. Runs in the background
+        // (boot doesn't wait; stop() drains it); a no-op once hosted; failure
+        // degrades to the old "run `op host-source`" path, never a dead boot.
+        if (opts.hostSourceOnBoot !== false)
+          platform.sourceHosting = platform
+            .hostSource(defaultSourceDir())
+            .then((hosted) => {
+              if (hosted.status === "error")
+                log.warn("self-source not hosted", {
+                  err: hosted.error.message,
+                });
+              else if (hosted.value.created)
+                log.info("self-source hosted", OPD);
+            });
         log.info("platform up", {
           domain: opts.domain,
           https: opts.httpsPort,
@@ -825,12 +884,17 @@ export class Platform {
    * srcDir would leak history + committed-then-ignored secrets, and would fail
    * to commit at all on a clean checkout — the actual bootstrap case.)
    *
+   * When srcDir is not a git checkout — the npm-installed case, where only the
+   * bundled binary exists — it falls back to the source tarball the package
+   * ships beside genesis/ (see scripts/build-package.ts), so a `bunx` platform
+   * is exactly as self-editable as one run from a checkout.
+   *
    * Idempotent + repair-safe: it skips only when plat/opd already has content
    * (a populated `main`), not merely a store row — so a partial seed re-runs
    * instead of wedging the repo.
    */
   async hostSource(
-    srcDir: string,
+    srcDir: string | null,
   ): Promise<Result<{ created: boolean }, PlatformError>> {
     return Result.tryPromise({
       try: async () => {
@@ -840,30 +904,18 @@ export class Platform {
 
         const admin = this.store.getUser(ADMIN_USER);
         if (!admin) throw new Error("admin user missing");
-        if (!this.store.getRepo(OPD.owner, OPD.name))
-          Result.unwrap(
-            await this.forge.createRepo(admin, OPD.owner, OPD.name),
-          );
 
         const tmp = await mkdtemp(join(tmpdir(), "op-hostsrc-"));
         try {
+          // Materialize the source FIRST; the repo (and its store row, which
+          // the console reads as "hosted") is created only once there is real
+          // content to seed — a failed publish leaves nothing behind.
           const work = join(tmp, "src");
           await mkdir(work, { recursive: true });
-          const tarFile = join(tmp, "src.tar");
-          const archive = Bun.spawn(
-            ["git", "-C", srcDir, "archive", "-o", tarFile, "HEAD"],
-            { stderr: "pipe" },
-          );
-          if ((await archive.exited) !== 0)
-            throw new Error(
-              `git archive HEAD failed (is ${srcDir} a git repo with a commit?): ${await new Response(archive.stderr).text()}`,
-            );
-          const untar = Bun.spawn(["tar", "-xf", tarFile, "-C", work], {
-            stderr: "pipe",
-          });
-          if ((await untar.exited) !== 0)
-            throw new Error(
-              `tar extract: ${await new Response(untar.stderr).text()}`,
+          await this.materializeSource(srcDir, tmp, work);
+          if (!this.store.getRepo(OPD.owner, OPD.name))
+            Result.unwrap(
+              await this.forge.createRepo(admin, OPD.owner, OPD.name),
             );
           Result.unwrap(
             await this.git.seedRepoFromDir(
@@ -883,10 +935,50 @@ export class Platform {
     });
   }
 
+  /** Extract the platform's source into `work`: from a checkout via
+   *  `git archive HEAD` when srcDir is given, else (or on archive failure)
+   *  from the tarball the npm package ships. Throws when neither exists. */
+  private async materializeSource(
+    srcDir: string | null,
+    tmp: string,
+    work: string,
+  ): Promise<void> {
+    let archiveErr = "no source checkout available";
+    if (srcDir) {
+      const tarFile = join(tmp, "src.tar");
+      const archive = Bun.spawn(
+        ["git", "-C", srcDir, "archive", "-o", tarFile, "HEAD"],
+        { stderr: "pipe" },
+      );
+      if ((await archive.exited) === 0) {
+        const untar = Bun.spawn(["tar", "-xf", tarFile, "-C", work], {
+          stderr: "pipe",
+        });
+        if ((await untar.exited) !== 0)
+          throw new Error(
+            `tar extract: ${await new Response(untar.stderr).text()}`,
+          );
+        return;
+      }
+      archiveErr = `git archive HEAD failed (is ${srcDir} a git repo with a commit?): ${(await new Response(archive.stderr).text()).trim()}`;
+    }
+    const shipped = defaultSourceTarball();
+    if (!shipped)
+      throw new Error(`${archiveErr}; no shipped source.tar.gz found either`);
+    const untgz = Bun.spawn(["tar", "-xzf", shipped, "-C", work], {
+      stderr: "pipe",
+    });
+    if ((await untgz.exited) !== 0)
+      throw new Error(
+        `extract shipped source ${shipped}: ${await new Response(untgz.stderr).text()}`,
+      );
+  }
+
   async stop(): Promise<void> {
     this.dispatcher?.stop();
     this.gate.stop();
     this.tcpGate.stop();
+    await this.sourceHosting; // never rejects (Result-typed inside)
     await this.reconciler.stop(); // drain in-flight passes before the store closes
     this.store.close();
   }

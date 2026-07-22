@@ -53,7 +53,7 @@ every coordinate:
 The host rule is one line — `<app>-<owner>.<domain>`
 (`packages/opd/src/policy.ts:85`). To put an app under an org, pass `owner`
 when creating it; the API defaults to your username and rejects any owner you
-can't write as `not a member` (`packages/opd/src/api.ts:205-207`). The
+can't write as `not a member` (`packages/opd/src/api.ts:251-253`). The
 one-motion on-ramp and [repo import](/docs/import-an-app) take the same
 `owner` field, and [work items](/docs/work-items) filed on org repos run
 through the same crew pipeline as personal ones.
@@ -64,7 +64,7 @@ Reads are public. Every existing repo — org-owned included — is
 world-readable, even anonymously (`packages/forge/src/forge.ts:168`). Writes
 require membership. A signed-in non-member gets the org page read-only, with
 the create-app and add-member forms hidden
-(`packages/opd/src/console/index.ts:488`).
+(`packages/opd/src/console/index.ts:490`).
 
 > [!note]
 > "Org-private" repos don't exist yet — don't put secrets in an org repo.
@@ -73,6 +73,6 @@ the create-app and add-member forms hidden
 ## In the console
 
 **Orgs** in the nav lists the orgs you belong to, with a create form
-(`packages/opd/src/console/index.ts:379`). Each org's page is the business's
+(`packages/opd/src/console/index.ts:381`). Each org's page is the business's
 software in one place: members, every app with live status, and repos that
 have no app spec — surfaced so nothing is invisible.

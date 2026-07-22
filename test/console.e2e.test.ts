@@ -272,11 +272,11 @@ describe.skipIf(!sock)("console: orgs, deps, design", () => {
     expect(html).toContain("dtoc-list");
     expect(html).toContain("dsearch-veil");
     expect(html).toContain('href="/docs"'); // Docs lives in the header nav
-    // plat/opd is NOT hosted here, so code references render as plain code —
-    // never a dead link. (Shape, not a specific anchor: the truth checker
-    // owns anchors and corrects them as the source moves.)
-    expect(html).toMatch(/<code>packages\/[^<]+\.ts:\d+<\/code>/);
-    expect(html).not.toContain('class="code-ref"');
+    // plat/opd is auto-hosted at boot, so code references link into the
+    // platform's own source blob view. (Shape, not a specific anchor: the
+    // truth checker owns anchors and corrects them as the source moves.)
+    expect(html).toContain('class="code-ref"');
+    expect(html).toMatch(/href="\/apps\/plat\/opd\/blob\/main\/[^"]+#L\d+"/);
 
     // Machine mirrors: raw page, llms index, search index.
     const md = await get("/docs/quickstart.md");

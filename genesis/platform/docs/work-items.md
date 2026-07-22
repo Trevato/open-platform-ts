@@ -70,18 +70,20 @@ tick picks it up.
 ## Parked reasons
 
 The crew parks an item when it needs you, stamping a machine-readable reason
-(`packages/opd/src/crew/dispatcher.ts:400`):
+(`packages/opd/src/crew/dispatcher.ts:434`):
 
-| Reason                  | What happened                                         |
-| ----------------------- | ----------------------------------------------------- |
-| `build-failed`          | the builder errored out                               |
-| `preview-never-up`      | the change's preview never answered                   |
-| `untestable`            | the reviewer couldn't exercise the preview            |
-| `rework-exhausted`      | blockers remain after the attempt budget              |
-| `merge-failed`          | the git merge failed after a passing review           |
-| `self-repo-human-merge` | the change edits the platform's own repos — you merge |
-| `daemon-restarted`      | the platform restarted and the item couldn't resume   |
-| `migrated`              | carried over from the pre-phase label system          |
+| Reason                  | What happened                                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `build-failed`          | the builder errored out                                                                         |
+| `declined`              | the builder declined mis-scoped work — its explanation of where the work belongs is in the feed |
+| `preview-never-up`      | the change's preview never answered                                                             |
+| `untestable`            | the reviewer couldn't exercise the preview                                                      |
+| `rework-exhausted`      | blockers remain after the attempt budget                                                        |
+| `merge-failed`          | the git merge failed after a passing review                                                     |
+| `self-repo-human-merge` | the change edits the platform's own repos — you merge                                           |
+| `template-human-merge`  | the change edits an app template — you merge                                                    |
+| `daemon-restarted`      | the platform restarted and the item couldn't resume                                             |
+| `migrated`              | carried over from the pre-phase label system                                                    |
 
 > [!note]
 > Parking never discards work: the change branch stays attached. Merge it,
@@ -90,7 +92,7 @@ The crew parks an item when it needs you, stamping a machine-readable reason
 ## Human controls
 
 Everything the crew does, you can do — from the item's console page or over
-HTTP (`packages/opd/src/api.ts:491`):
+HTTP (`packages/opd/src/api.ts:537`):
 
 | Action                          | Effect                                                                                        |
 | ------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -108,4 +110,4 @@ ever minted (`packages/store/src/schema.ts:178`). An old `/pulls/N` URL
 resolves through that table to its linked work item via the `agent/issue-N`
 branch convention and redirects there; a historic PR with no linked item gets
 a tombstone page explaining the move
-(`packages/opd/src/console/index.ts:924`).
+(`packages/opd/src/console/index.ts:928`).

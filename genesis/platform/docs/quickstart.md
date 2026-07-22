@@ -16,9 +16,9 @@ bunx open-platform-ts up
 ```
 
 The first boot mints the world: a sovereign key, sealed secrets, the system
-repos, and an admin user (`packages/opd/src/platform.ts:181`). It ends by printing
+repos, and an admin user (`packages/opd/src/platform.ts:214`). It ends by printing
 your platform card — domain, console URL, the admin password, and a
-ready-to-paste first-app command (`packages/opd/src/cli.ts:24`).
+ready-to-paste first-app command (`packages/opd/src/cli.ts:29`).
 
 > [!warning]
 > The sovereign key file named on the card is the **only** decryptor of this
@@ -43,7 +43,7 @@ globally, so `op up` works too.
 
 Everything a platform is — sovereign key, repos, databases, certs — lives
 under one directory, `~/.op/<domain>` by default
-(`packages/opd/src/cli.ts:15`). That makes both answers short.
+(`packages/opd/src/cli.ts:20`). That makes both answers short.
 
 **Another platform on the same machine:** give it its own domain and ports.
 The state root follows the domain, so nothing collides — and any
@@ -81,7 +81,7 @@ spend time on.
 
 The fastest path is to describe a task in plain words — the on-ramp names an
 app for you, deploys it, and files the first build in one motion
-(`packages/opd/src/api.ts:255`):
+(`packages/opd/src/api.ts:301`):
 
 > I keep track of vacation requests for our office — who asked, the dates,
 > and whether their manager approved.
@@ -92,7 +92,7 @@ URL. The whole pipeline streams live on the work item's page.
 
 If you'd rather push code, create an app (seeded from the starter template)
 and clone it — every app is a git repo on your platform
-(`packages/opd/src/api.ts:185`):
+(`packages/opd/src/api.ts:231`):
 
 ```sh title="Terminal"
 curl -sk -u plat:<password> -X POST https://plat.localtest.me/api/v1/apps \
@@ -110,7 +110,7 @@ platform builds the Dockerfile, runs the container, and routes
 ## Give the crew its credential
 
 The build crew drives the `claude` CLI and needs a Claude Code OAuth token
-(`packages/opd/src/platform.ts:318`):
+(`packages/opd/src/platform.ts:353`):
 
 ```sh title="Terminal"
 claude setup-token          # prints sk-ant-oat01-…

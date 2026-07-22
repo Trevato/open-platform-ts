@@ -67,7 +67,7 @@ When the platform itself mutates desired state — registering a new app,
 rotating a secret — it commits to the bare repo on disk via a temp clone
 (`packages/opd/src/gitops.ts:34`). That path never touches Smart HTTP, so
 no push event fires; the caller kicks the reconciler explicitly instead
-(`packages/opd/src/api.ts:239-240`). Same converge loop, different doorbell.
+(`packages/opd/src/api.ts:285-286`). Same converge loop, different doorbell.
 
 > [!tip]
 > You can edit desired state the same way the platform does: clone
@@ -77,7 +77,7 @@ no push event fires; the caller kicks the reconciler explicitly instead
 ## Two more repos get special handling
 
 The same push wiring drives the platform's own configuration and source
-(`packages/opd/src/platform.ts:452-461`):
+(`packages/opd/src/platform.ts:489-509`):
 
 | Repo            | On push                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------ |
