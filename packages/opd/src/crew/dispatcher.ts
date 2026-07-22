@@ -82,15 +82,24 @@ export class Dispatcher {
     // merged; finish its ledger here.
     for (const item of store.listWorkByPhase("parked")) {
       if (item.change_state !== "open" || !item.head_ref) continue;
-      void this.deps.git
-        .isAncestor(
-          item.owner,
-          item.repo,
-          item.head_ref,
-          item.base_ref ?? "main",
-        )
-        .then((merged) => {
+      // Fire-and-forget, but FULLY guarded: isAncestor spawns git (tens of ms),
+      // and in that window a human Close/Merge or another path can move this
+      // item out of parked — making setWorkPhase(...,'shipped') an illegal
+      // transition that throws. Uncaught in a bare .then() that would be an
+      // unhandled rejection, which kills the daemon (fatal in unsupervised
+      // mode). Re-read the row after the await and catch everything.
+      void (async () => {
+        try {
+          const merged = await this.deps.git.isAncestor(
+            item.owner,
+            item.repo,
+            item.head_ref!,
+            item.base_ref ?? "main",
+          );
           if (!merged) return;
+          const cur = store.getIssue(item.owner, item.repo, item.number);
+          if (!cur || cur.phase !== "parked" || cur.change_state !== "open")
+            return; // moved on concurrently — nothing to repair
           store.setWorkPhase(item.owner, item.repo, item.number, "shipped");
           store.setChangeState(item.owner, item.repo, item.number, "merged");
           this.comment(
@@ -100,7 +109,13 @@ export class Dispatcher {
           this.deps.log.info("crew: repaired interrupted merge", {
             issue: this.key(item),
           });
-        });
+        } catch (cause) {
+          this.deps.log.warn("crew: merge-repair skipped", {
+            issue: this.key(item),
+            err: String(cause),
+          });
+        }
+      })();
     }
     for (const phase of ["building", "reworking"] as const) {
       for (const item of store.listWorkByPhase(phase)) {

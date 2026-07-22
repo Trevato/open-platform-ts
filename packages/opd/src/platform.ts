@@ -901,12 +901,17 @@ export class Platform {
    */
   async hostSource(
     srcDir: string | null,
-  ): Promise<Result<{ created: boolean }, PlatformError>> {
+  ): Promise<
+    Result<
+      { created: boolean; source: "checkout" | "tarball" | null },
+      PlatformError
+    >
+  > {
     return Result.tryPromise({
       try: async () => {
         const listed = await this.git.listFiles(OPD.owner, OPD.name, "main");
         if (listed.status === "ok" && listed.value.length > 0)
-          return { created: false };
+          return { created: false, source: null };
 
         const admin = this.store.getUser(ADMIN_USER);
         if (!admin) throw new Error("admin user missing");
@@ -918,7 +923,7 @@ export class Platform {
           // content to seed — a failed publish leaves nothing behind.
           const work = join(tmp, "src");
           await mkdir(work, { recursive: true });
-          await this.materializeSource(srcDir, tmp, work);
+          const source = await this.materializeSource(srcDir, tmp, work);
           if (!this.store.getRepo(OPD.owner, OPD.name))
             Result.unwrap(
               await this.forge.createRepo(admin, OPD.owner, OPD.name),
@@ -931,24 +936,25 @@ export class Platform {
               "host source",
             ),
           );
+          return { created: true, source };
         } finally {
           await rm(tmp, { recursive: true, force: true });
         }
-        return { created: true };
       },
       catch: (cause) =>
         new PlatformError({ message: String(cause), step: "host-source" }),
     });
   }
 
-  /** Extract the platform's source into `work`: from a checkout via
-   *  `git archive HEAD` when srcDir is given, else (or on archive failure)
-   *  from the tarball the npm package ships. Throws when neither exists. */
+  /** Extract the platform's source into `work` and report which source won:
+   *  from a checkout via `git archive HEAD` when srcDir is given, else (or on
+   *  archive failure) from the tarball the npm package ships. Throws when
+   *  neither exists. */
   private async materializeSource(
     srcDir: string | null,
     tmp: string,
     work: string,
-  ): Promise<void> {
+  ): Promise<"checkout" | "tarball"> {
     let archiveErr = "no source checkout available";
     if (srcDir) {
       const tarFile = join(tmp, "src.tar");
@@ -964,7 +970,7 @@ export class Platform {
           throw new Error(
             `tar extract: ${await new Response(untar.stderr).text()}`,
           );
-        return;
+        return "checkout";
       }
       archiveErr = `git archive HEAD failed (is ${srcDir} a git repo with a commit?): ${(await new Response(archive.stderr).text()).trim()}`;
     }
@@ -978,6 +984,7 @@ export class Platform {
       throw new Error(
         `extract shipped source ${shipped}: ${await new Response(untgz.stderr).text()}`,
       );
+    return "tarball";
   }
 
   async stop(): Promise<void> {

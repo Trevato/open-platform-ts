@@ -41,6 +41,22 @@ describe("issue dependencies", () => {
     expect(h.store.openBlockers("ada", "app", a)).toEqual([]);
   });
 
+  test("rejects a dependency on an item already past 'queued' (silent-ignore guard)", async () => {
+    const h = await harness();
+    const a = h.mk("dependent"); // #1, intent
+    const b = h.mk("blocker"); // #2, intent
+    // Queue #1 then advance it to building (what the dispatcher's claim does).
+    h.store.setWorkPhase("ada", "app", a, "queued");
+    h.store.claimWork("ada", "app", a); // → building
+    const r = h.forge.setIssueDep(h.ada, "ada", "app", a, b);
+    expect(r.status).toBe("error");
+    if (r.status === "error") expect(r.error.message).toContain("already in");
+    // Still allowed while queued (before the crew claims it).
+    const c = h.mk("dep2"); // #3, intent
+    h.store.setWorkPhase("ada", "app", c, "queued");
+    Result.unwrap(h.forge.setIssueDep(h.ada, "ada", "app", c, b));
+  });
+
   test("rejects self-edges and cycles (graph stays a DAG)", async () => {
     const h = await harness();
     const a = h.mk("a");

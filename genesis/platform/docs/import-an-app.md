@@ -31,7 +31,7 @@ platform `cloneUrl`, and the number of the conversion work item.
 > [!note]
 > `op app import <seed.tar.gz>` is a different verb: it moves an app that
 > already runs on one platform to another, data included
-> (`packages/opd/src/cli.ts:193`). See [Sovereignty](/docs/sovereignty).
+> (`packages/opd/src/cli.ts:215`). See [Sovereignty](/docs/sovereignty).
 
 ## The conversion work item
 

@@ -26,21 +26,21 @@ source side.
 ## The source is hosted automatically
 
 Every boot publishes the daemon's own tracked source into `plat/opd` if it
-isn't there yet (`packages/opd/src/platform.ts:581`). From a git checkout
-that's `git archive HEAD` (`packages/opd/src/platform.ts:896`): no `.git`
+isn't there yet (`packages/opd/src/platform.ts:587`). From a git checkout
+that's `git archive HEAD` (`packages/opd/src/platform.ts:962`): no `.git`
 history, and no untracked files — a stray secret in the source directory can
 never land in the world-readable repo, which an e2e test proves with a
 planted `SECRET.token` (`test/host-source.e2e.test.ts:65`). From an npm
 install (`bunx open-platform-ts up`) there is no checkout, so the publish
 falls back to the source tarball the package ships beside `genesis/`
-(`packages/opd/src/platform.ts:965`) — the exact tree the running binary was
+(`packages/opd/src/platform.ts:977`) — the exact tree the running binary was
 built from. `op host-source <dir>` remains as the manual override
-(`packages/opd/src/cli.ts:231`).
+(`packages/opd/src/cli.ts:253`).
 
 ## Self-upgrade on merge
 
 Boot in supervised mode by pointing `OP_SRC` at a managed clone of
-`plat/opd` (`packages/opd/src/cli.ts:101`):
+`plat/opd` (`packages/opd/src/cli.ts:123`):
 
 ```sh title="Terminal"
 git clone ~/.op/<domain>/repos/plat/opd.git opd-src

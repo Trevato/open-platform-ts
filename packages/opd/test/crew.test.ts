@@ -211,6 +211,32 @@ describe("builder", () => {
     expect(h.store.getIssue("plat", "app", 1)?.change_state).toBeNull();
   });
 
+  test("DECLINED wins over a stray uncommitted file — the backstop must not ship it", async () => {
+    const h = await harness();
+    // The agent leaves a scratch file dirty (does NOT commit) and declines.
+    // The backstop must NOT sweep it into a commit that masks the decline and
+    // attaches unvetted work (the prompt-injection vector).
+    const declinerWithStray: RunAgent = async (run) => {
+      await writeFile(join(run.cwd, "SCRATCH.md"), "investigation notes\n");
+      return Result.ok({
+        ok: true,
+        result: "Looked into it.\nDECLINED: this needs a product decision.",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    };
+    const issue = claimed(h, "app", { title: "x", body: "" });
+    const built = await runBuilder(
+      builderDeps(h, declinerWithStray, h.admin),
+      issue,
+    );
+    expect(built.status).toBe("ok");
+    if (built.status === "ok")
+      expect(built.value.declined).toContain("product decision");
+    // No change attached, nothing pushed.
+    expect(h.store.getIssue("plat", "app", 1)?.change_state).toBeNull();
+  });
+
   // Authored by the crew itself (plat/opd#1) — the editable-path allowlist.
   test("plat/platform: rejects an edit outside the crew/**/*.md + platform.json allowlist", async () => {
     const h = await harness();
@@ -739,6 +765,58 @@ describe("dispatcher", () => {
       .map((c) => c.body)
       .join("\n");
     expect(comments).toContain("ledger is now caught up");
+  });
+
+  test("sweepStranded is race-safe: a concurrent phase change during the ancestor check never crashes or wrongly ships", async () => {
+    const h = await harness();
+    const seed = await mkdtemp(join(tmpdir(), "op-plat-"));
+    dirs.push(seed);
+    await writeFile(join(seed, "platform.json"), "{}\n");
+    Result.unwrap(await h.forge.createRepo(h.admin, "plat", "platform"));
+    Result.unwrap(
+      await h.git.seedRepoFromDir("plat", "platform", seed, "init"),
+    );
+    const configAgent: RunAgent = async (run) => {
+      await mkdir(join(run.cwd, "crew"), { recursive: true });
+      await writeFile(join(run.cwd, "crew", "b.md"), "tweak\n");
+      return Result.ok({
+        ok: true,
+        result: "done",
+        costUsd: 0.01,
+        numTurns: 1,
+      });
+    };
+    const d = new Dispatcher(dispatcherReviewDeps(h, configAgent));
+    fileWork(h, "platform", { title: "tweak", body: "b" });
+    await d.tick();
+    await settle(h, 1, 20_000, "platform");
+    Result.unwrap(
+      await h.git.mergeBranch("plat", "platform", "main", "agent/issue-1", "m"),
+    );
+
+    // A git whose isAncestor, mid-check, simulates a human closing the item
+    // (parked → closed) — so the repair's setWorkPhase(...,'shipped') would be
+    // an ILLEGAL transition. The guard must re-read and skip, never throw.
+    const racingGit = new Proxy(h.git, {
+      get(target, prop, recv) {
+        if (prop === "isAncestor")
+          return async (...args: unknown[]) => {
+            h.forge.closeWork(h.admin, "plat", "platform", 1); // concurrent close
+            return (target as unknown as { isAncestor: Function }).isAncestor(
+              ...args,
+            );
+          };
+        return Reflect.get(target, prop, recv);
+      },
+    });
+    const deps = { ...dispatcherReviewDeps(h, null), git: racingGit };
+    const d2 = new Dispatcher(deps);
+    d2.start(600_000);
+    await Bun.sleep(400); // let the guarded repair run to completion
+    d2.stop();
+    // Closed by the human, NOT force-shipped by the repair; process alive.
+    const item = h.store.getIssue("plat", "platform", 1)!;
+    expect(item.phase).toBe("closed");
   });
 
   test("without a credential, stays queued and does not build (no stale comment)", async () => {

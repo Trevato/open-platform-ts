@@ -94,8 +94,25 @@ async function serve(domain: string): Promise<number> {
   return 0;
 }
 
+const USAGE =
+  "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op admin-password        print this platform's admin password\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (automatic on boot; use for a specific checkout or to repair)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1";
+
 async function main(): Promise<number> {
-  const [cmd, ...rest] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  // Help is a global flag, checked before dispatch: an unrecognized flag must
+  // never fall through to a command that would treat it as a positional
+  // (e.g. `op seed --help` writing a file literally named `--help` and booting
+  // the DEFAULT platform on :80/:443). A leading-dash arg anywhere → usage.
+  if (argv.some((a) => a === "-h" || a === "--help" || a === "help")) {
+    console.log(USAGE);
+    return 0;
+  }
+  const stray = argv.find((a) => a.startsWith("-"));
+  if (stray) {
+    console.error(`op: unknown flag '${stray}'\n\n${USAGE}`);
+    return 2;
+  }
+  const [cmd, ...rest] = argv;
   const domain = env("DOMAIN", "plat.localtest.me");
 
   switch (cmd) {
@@ -254,8 +271,8 @@ async function main(): Promise<number> {
       }
       console.log(
         hosted.value.created
-          ? `hosted plat/opd from ${srcDir ?? "the shipped source tarball"} — the crew can now edit the platform; push to plat/opd to self-upgrade`
-          : "plat/opd already hosted",
+          ? `hosted plat/opd from ${hosted.value.source === "tarball" ? "the shipped source tarball" : (srcDir ?? "the running source")} — the crew can now edit the platform; push to plat/opd to self-upgrade`
+          : "plat/opd already hosted (published at boot) — nothing to do; remove the plat/opd repo first if you need to re-publish from a different source",
       );
       const root = env("OP_ROOT", join(homedir(), ".op", domain));
       const sourceRepo = join(root, "repos", "plat", "opd.git");
@@ -283,9 +300,7 @@ async function main(): Promise<number> {
       return 0;
     }
     default:
-      console.log(
-        "op — Open Platform\n\n  op up                    boot (or resume) the platform\n  op admin-password        print this platform's admin password\n  op seed [out]            export a seed of this platform\n  op germinate             grow a seed into a sovereign platform (SEED=, DOMAIN=)\n  op app export <o>/<a>    export one app as a portable artifact\n  op app import <seed>     ingest an app someone sold you (optional owner/app remap)\n  op host-source [dir]     publish the platform's own source into plat/opd (automatic on boot; this overrides the dir)\n  op lineage               print this platform's family tree\n\n  env: DOMAIN, OP_ROOT, HTTP_PORT, HTTPS_PORT, FORK_KEY_ACK=1",
-      );
+      console.log(USAGE);
       return cmd ? 2 : 0;
   }
 }

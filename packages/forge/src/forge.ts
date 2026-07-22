@@ -651,6 +651,23 @@ export class Forge {
           code: "not_found",
         }),
       );
+    // Phase gate: the dispatcher only consults blockers while an item is still
+    // `queued` (dispatcher tick, before it claims). Declaring a blocker on an
+    // item the crew has already claimed (building/reviewing/…) would be
+    // silently ignored — so reject it loudly instead of pretending it blocks.
+    // Declare deps while the item is in `intent` or `queued`.
+    const itemPhase = this.store.getIssue(
+      item.owner,
+      item.repo,
+      item.number,
+    )!.phase;
+    if (itemPhase !== "intent" && itemPhase !== "queued")
+      return Result.err(
+        new ForgeError({
+          message: `cannot add a dependency to a work item already in '${itemPhase}' — declare blockers before it is queued`,
+          code: "invalid",
+        }),
+      );
     // Cycle check over (owner, repo, number) triples: adding item→on is
     // illegal if `on` already depends (transitively) on `item`.
     const keyOf = (x: { owner: string; repo: string; number: number }) =>
@@ -896,6 +913,17 @@ export class Forge {
         new ForgeError({
           message: `issue #${blockedBy} not found`,
           code: "not_found",
+        }),
+      );
+    // Phase gate (see addWorkDep): the dispatcher only honors blockers while an
+    // item is still queued, so declaring one on an already-claimed item would
+    // be silently ignored — reject it instead. Declare deps before queuing.
+    const phase = this.store.getIssue(owner, repo, number)!.phase;
+    if (phase !== "intent" && phase !== "queued")
+      return Result.err(
+        new ForgeError({
+          message: `cannot add a dependency to a work item already in '${phase}' — declare blockers before it is queued`,
+          code: "invalid",
         }),
       );
     // Cycle check: adding number→blockedBy is illegal if blockedBy already

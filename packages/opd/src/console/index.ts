@@ -908,6 +908,9 @@ function addLabel(){
   var inp=document.getElementById('d-addlabel');if(!inp)return;
   var l=inp.value.trim().toLowerCase();inp.value='';
   if(!/^[a-z0-9][a-z0-9:._-]{0,63}$/.test(l))return;
+  // agent-import selects the importer crew role (a repo-conversion flow) — it
+  // is not a free-text label a person hand-types onto an ordinary draft.
+  if(l==='agent-import')return;
   if(document.querySelector('#d-labels [data-l="'+l.replace(/"/g,'')+'"]'))return;
   var s=document.createElement('span');s.className='pill agent chip rm';s.dataset.l=l;
   s.onclick=function(){s.remove()};s.textContent=l+' ×';

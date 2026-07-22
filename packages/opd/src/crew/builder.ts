@@ -255,6 +255,21 @@ export async function runBuilder(
         if (run.status === "error")
           throw new Error(`agent: ${run.error.message}`);
 
+        // Decline is authoritative and evaluated BEFORE the backstop: a
+        // declining agent is contractually forbidden to commit, so stray
+        // uncommitted files (scratch notes, a half-written file) must never be
+        // swept into a commit that masks the decline and ships unvetted work
+        // — including issue-body prompt-injection that leaves a file behind.
+        // If the agent both declined AND committed real work (contract
+        // violation), the commits win and we proceed as a normal change.
+        const declined = declineNote(run.value.result);
+        if (declined) {
+          const hasCommits = rework
+            ? (await revParse(checkout)) !== headBefore
+            : (await aheadOfMain(checkout)) > 0;
+          if (!hasCommits) return { costUsd: run.value.costUsd, declined };
+        }
+
         // Backstop: commit anything the agent left uncommitted so a forgotten
         // final commit doesn't lose work.
         await git(checkout, ["add", "-A"]);
@@ -302,8 +317,9 @@ export async function runBuilder(
           ? (await revParse(checkout)) === headBefore
           : (await aheadOfMain(checkout)) === 0;
         if (noChanges) {
-          const declined = declineNote(run.value.result);
-          if (declined) return { costUsd: run.value.costUsd, declined };
+          // A decline with no commits already returned above; reaching here
+          // means the agent neither changed anything nor declined — fail loud
+          // with its own final words so the park comment says why.
           const said = run.value.result.trim().slice(0, 200);
           throw new Error(
             rework

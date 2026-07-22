@@ -62,9 +62,14 @@ count. [How a request becomes software](/docs/how-it-builds) walks the loop.
 Declare "blocked by" edges with full coordinates — `{on: "owner/repo#3"}`.
 Edges may cross repos but not owners, and self-edges and cycles are rejected
 at add time, so the graph is always a DAG
-(`packages/forge/src/forge.ts:613`). The dispatcher skips a queued item while
+(`packages/forge/src/forge.ts:613`). Declare blockers **before the item is
+queued** (while it is still `intent`, i.e. before you add `agent-work`): the
+dispatcher consults blockers only while an item is queued, so a dependency
+added after the crew has already claimed it would be silently ignored — and
+is therefore rejected with a clear error
+(`packages/forge/src/forge.ts:667`). The dispatcher skips a queued item while
 any blocker is in a non-terminal phase
-(`packages/opd/src/crew/dispatcher.ts:145`); when the blocker ships, the next
+(`packages/opd/src/crew/dispatcher.ts:166`); when the blocker ships, the next
 tick picks it up.
 
 ## Parked reasons
